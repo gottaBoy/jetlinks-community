@@ -188,14 +188,35 @@ class TcpServerDeviceGateway extends AbstractDeviceGateway implements DeviceGate
                 legalityChecker = null;
             }
             monitor.receivedMessage();
+            // 记录 EVENT 消息的处理入口
+            if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                log.info("TcpServerDeviceGateway.handleDeviceMessage EVENT消息处理入口: deviceId={}, messageId={}, messageType={}", 
+                    message.getDeviceId(), message.getMessageId(), message.getMessageType());
+            }
             return helper
                 .handleDeviceMessage(
                     message,
                     device -> new TcpDeviceSession(device, client,DefaultTransport.TCP, monitor),
                     session -> {
-                        TcpDeviceSession deviceSession = session.unwrap(TcpDeviceSession.class);
-                        deviceSession.setClient(client);
-                        sessionRef.set(deviceSession);
+                        // 检查会话类型，如果是TcpDeviceSession则更新，否则创建新的TCP会话替换
+                        if (session.isWrapFrom(TcpDeviceSession.class)) {
+                            TcpDeviceSession deviceSession = session.unwrap(TcpDeviceSession.class);
+                            deviceSession.setClient(client);
+                            sessionRef.set(deviceSession);
+                        } else {
+                            // 如果当前会话不是TCP会话（可能是HTTP会话），创建新的TCP会话替换
+                            // 这支持设备同时通过TCP和HTTP接入的场景
+                            // 使用sessionManager.compute来替换会话，确保线程安全
+                            DeviceOperator operator = session.getOperator();
+                            if (operator != null) {
+                                TcpDeviceSession newSession = new TcpDeviceSession(operator, client, DefaultTransport.TCP, monitor);
+                                sessionManager.compute(message.getDeviceId(), null, old -> Mono.just(newSession))
+                                    .doOnNext(newSessionRef -> sessionRef.set(newSession))
+                                    .subscribe();
+                            } else {
+                                log.warn("TCP{}: Cannot create TCP session for device[{}], operator is null", address, message.getDeviceId());
+                            }
+                        }
                     },
                     () -> log.warn("TCP{}: The device[{}] in the message body does not exist:{}", address, message.getDeviceId(), message)
                 )

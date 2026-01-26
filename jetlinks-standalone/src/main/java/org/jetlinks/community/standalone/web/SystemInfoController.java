@@ -15,6 +15,7 @@
  */
 package org.jetlinks.community.standalone.web;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.AllArgsConstructor;
 import org.hswebframework.web.authorization.annotation.Authorize;
 import org.jetlinks.community.Version;
@@ -25,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
+@Tag(name = "系统信息管理")
 @RequestMapping("/system")
 @RestController
 @AllArgsConstructor

@@ -67,8 +67,19 @@ public abstract class AbstractSaveOperations implements SaveOperations {
 
     @Override
     public final Mono<Void> save(ThingMessage thingMessage) {
+        // 特别记录 EVENT 消息的保存入口
+        if (thingMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            log.info("AbstractSaveOperations.save 收到 EVENT 消息: deviceId={}, messageType={}, messageId={}", 
+                thingMessage.getThingId(), thingMessage.getMessageType(), thingMessage.getMessageId());
+        }
         return this
             .convertMessageToTimeSeriesData(thingMessage)
+            .doOnNext(tp2 -> {
+                if (thingMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                    log.info("EVENT 消息转换为时序数据: deviceId={}, metric={}", 
+                        thingMessage.getThingId(), tp2.getT1());
+                }
+            })
             .flatMap(tp2 -> this.doSave(tp2.getT1(), tp2.getT2()))
             .then();
     }
@@ -122,7 +133,7 @@ public abstract class AbstractSaveOperations implements SaveOperations {
     }
 
     protected String getTemplateIdFromMessage(ThingMessage message) {
-        String templateId = message.getHeader(Headers.productId).orElse(null);
+        String templateId = message.getHeader(PropertyConstants.productId).orElse(null);
         if (templateId == null) {
             templateId = message.getHeader(ThingConstants.templateId).orElse(null);
         }
@@ -139,11 +150,21 @@ public abstract class AbstractSaveOperations implements SaveOperations {
     protected Flux<Tuple2<String, TimeSeriesData>> convertMessageToTimeSeriesData(ThingMessage message) {
         boolean ignoreStorage = message.getHeaderOrDefault(Headers.ignoreStorage);
         boolean ignoreLog = message.getHeaderOrDefault(Headers.ignoreLog);
+        
+        // 特别记录 EVENT 消息的处理信息
+        if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            log.info("处理 EVENT 消息: deviceId={}, messageType={}, ignoreStorage={}, ignoreLog={}", 
+                message.getThingId(), message.getMessageType(), ignoreStorage, ignoreLog);
+        }
+        
         if (ignoreStorage && ignoreLog) {
             return Flux.empty();
         }
         String templateId = getTemplateIdFromMessage(message);
         if (templateId == null) {
+            if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                log.warn("EVENT 消息缺少 productId: deviceId={}", message.getThingId());
+            }
             return Flux.empty();
         }
         List<Publisher<Tuple2<String, TimeSeriesData>>> all = new ArrayList<>(2);
@@ -170,8 +191,25 @@ public abstract class AbstractSaveOperations implements SaveOperations {
             }
         }
         //配置了记录日志,并且消息头里没有标记忽略日志
-        if (settings.getLogFilter().match(message.getMessageType()) && !ignoreLog) {
+        boolean logFilterMatch = settings.getLogFilter().match(message.getMessageType());
+        
+        // 详细记录所有消息类型的日志决策过程
+        if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT || 
+            message.getMessageType() == org.jetlinks.core.message.MessageType.ONLINE ||
+            message.getMessageType() == org.jetlinks.core.message.MessageType.OFFLINE ||
+            message.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION ||
+            message.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION_REPLY) {
+            log.info("设备日志决策: deviceId={}, productId={}, messageType={}, ignoreLog={}, ignoreStorage={}, logFilterMatch={}, 是否创建日志={}", 
+                message.getThingId(), templateId, message.getMessageType(), ignoreLog, ignoreStorage, logFilterMatch, (logFilterMatch && !ignoreLog));
+        }
+        
+        if (logFilterMatch && !ignoreLog) {
+            log.info("准备创建设备日志: deviceId={}, productId={}, messageType={}, ignoreLog={}, logFilterMatch={}", 
+                message.getThingId(), templateId, message.getMessageType(), ignoreLog, logFilterMatch);
             all.add(createDeviceMessageLog(templateId, message));
+        } else {
+            log.warn("跳过设备日志记录: deviceId={}, productId={}, messageType={}, ignoreLog={}, logFilterMatch={}", 
+                message.getThingId(), templateId, message.getMessageType(), ignoreLog, logFilterMatch);
         }
 
         return Flux.concat(all);

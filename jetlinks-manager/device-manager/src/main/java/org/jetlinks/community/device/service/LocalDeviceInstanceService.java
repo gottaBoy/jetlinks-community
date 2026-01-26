@@ -47,7 +47,9 @@ import org.jetlinks.core.message.FunctionInvokeMessageSender;
 import org.jetlinks.core.message.ReadPropertyMessageSender;
 import org.jetlinks.core.message.WritePropertyMessageSender;
 import org.jetlinks.core.message.codec.Transport;
+import org.jetlinks.core.message.function.FunctionInvokeMessage;
 import org.jetlinks.core.message.function.FunctionInvokeMessageReply;
+import org.jetlinks.core.message.function.FunctionParameter;
 import org.jetlinks.core.message.property.ReadPropertyMessageReply;
 import org.jetlinks.core.message.property.WritePropertyMessageReply;
 import org.jetlinks.core.metadata.*;
@@ -57,6 +59,7 @@ import org.jetlinks.core.utils.CompositeMap;
 import org.jetlinks.core.utils.CyclicDependencyChecker;
 import org.jetlinks.community.device.entity.*;
 import org.jetlinks.community.device.enums.DeviceState;
+import org.jetlinks.community.device.message.DeviceMessageConnector;
 import org.jetlinks.community.device.events.DeviceDeployedEvent;
 import org.jetlinks.community.device.events.DeviceUnregisterEvent;
 import org.jetlinks.community.device.web.response.DeviceDeployResult;
@@ -98,6 +101,8 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
 
     private final LocalDeviceProductService deviceProductService;
 
+    private final DeviceMessageConnector deviceMessageConnector;
+
     private final ReactiveRepository<DeviceTagEntity, String> tagRepository;
 
     private final ApplicationEventPublisher eventPublisher;
@@ -115,7 +120,8 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
                                       ApplicationEventPublisher eventPublisher,
                                       DeviceConfigMetadataManager metadataManager,
                                       RelationService relationService,
-                                      TransactionalOperator transactionalOperator) {
+                                      TransactionalOperator transactionalOperator,
+                                      DeviceMessageConnector deviceMessageConnector) {
         this.registry = registry;
         this.deviceProductService = deviceProductService;
         this.tagRepository = tagRepository;
@@ -123,6 +129,7 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
         this.metadataManager = metadataManager;
         this.relationService = relationService;
         this.transactionalOperator = transactionalOperator;
+        this.deviceMessageConnector = deviceMessageConnector;
     }
 
     @Override
@@ -735,7 +742,7 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
     public Flux<?> invokeFunction(String deviceId,
                                   String functionId,
                                   Map<String, Object> properties) {
-        return invokeFunction(deviceId, functionId, properties, true);
+        return invokeFunction(deviceId, functionId, properties, false);
     }
 
     //设备功能调用
@@ -744,18 +751,138 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
                                   String functionId,
                                   Map<String, Object> properties,
                                   boolean convertReply) {
+        long startTime = System.currentTimeMillis();
         return registry
             .getDevice(deviceId)
             .switchIfEmpty(handleDeviceNotFoundInRegistry(deviceId))
-            .flatMap(operator -> operator
-                .messageSender()
-                .invokeFunction(functionId)
-                .messageId(IDGenerator.SNOW_FLAKE_STRING.generate())
-                .setParameter(properties)
-                .validate()
-            )
-            .flatMapMany(FunctionInvokeMessageSender::send)
-            .flatMap(convertReply ? mapReply(FunctionInvokeMessageReply::getOutput) : Mono::just);
+            .doOnNext(operator -> {
+                long elapsed = System.currentTimeMillis() - startTime;
+                log.info("获取设备操作器完成: deviceId={}, functionId={}, elapsedTime={}ms", 
+                    deviceId, functionId, elapsed);
+            })
+            .flatMap(operator -> {
+                log.info("开始调用设备功能: deviceId={}, functionId={}, properties={}", 
+                    deviceId, functionId, properties);
+                long sendStartTime = System.currentTimeMillis();
+                
+                // 检查properties中是否包含自定义messageId
+                final String customMessageId;
+                if (properties != null && properties.containsKey("messageId")) {
+                    Object messageIdObj = properties.get("messageId");
+                    if (messageIdObj != null) {
+                        String msgId = String.valueOf(messageIdObj).trim();
+                        customMessageId = msgId.isEmpty() ? null : msgId;
+                        if (customMessageId != null) {
+                            log.info("使用自定义messageId: deviceId={}, functionId={}, messageId={}", 
+                                deviceId, functionId, customMessageId);
+                        }
+                    } else {
+                        customMessageId = null;
+                    }
+                } else {
+                    customMessageId = null;
+                }
+                
+                FunctionInvokeMessageSender sender = operator
+                    .messageSender()
+                    .invokeFunction(functionId);
+                
+                // 如果提供了自定义messageId，使用自定义的；否则自动生成
+                if (customMessageId != null && !customMessageId.isEmpty()) {
+                    sender.messageId(customMessageId);
+                } else {
+                    sender.messageId(IDGenerator.SNOW_FLAKE_STRING.generate());
+                }
+                
+                return sender
+                    .setParameter(properties)
+                    .validate()
+                    .doOnNext(s -> {
+                        long elapsed = System.currentTimeMillis() - sendStartTime;
+                        String finalMessageId = customMessageId != null ? customMessageId : "auto-generated";
+                        log.info("功能调用消息构建完成: deviceId={}, functionId={}, messageId={}, elapsedTime={}ms", 
+                            deviceId, functionId, finalMessageId, elapsed);
+                    })
+                    .map(s -> Tuples.of(s, customMessageId, properties));
+            })
+            .flatMapMany(tuple -> {
+                FunctionInvokeMessageSender sender = tuple.getT1();
+                String customMessageId = tuple.getT2();
+                Map<String, Object> functionProperties = tuple.getT3();
+                
+                long sendTime = System.currentTimeMillis();
+                log.info("开始发送功能调用消息: deviceId={}, functionId={}, sendTime={}", 
+                    deviceId, functionId, sendTime);
+                
+                // 创建功能调用消息用于记录日志（类似 ParallelTcpDeviceMessageCodec 中发送 DeviceOnlineMessage 的方式）
+                FunctionInvokeMessage logMessage = new FunctionInvokeMessage();
+                logMessage.setDeviceId(deviceId);
+                logMessage.setFunctionId(functionId);
+                if (functionProperties != null) {
+                    // 将 functionProperties 转换为 FunctionParameter 列表
+                    List<FunctionParameter> inputs = new ArrayList<>();
+                    for (Map.Entry<String, Object> entry : functionProperties.entrySet()) {
+                        if (!"messageId".equals(entry.getKey())) {
+                            FunctionParameter param = new FunctionParameter();
+                            param.setName(entry.getKey());
+                            param.setValue(entry.getValue());
+                            inputs.add(param);
+                        }
+                    }
+                    logMessage.setInputs(inputs);
+                }
+                String messageId = customMessageId != null ? customMessageId : IDGenerator.SNOW_FLAKE_STRING.generate();
+                logMessage.setMessageId(messageId);
+                logMessage.setTimestamp(System.currentTimeMillis());
+                
+                // 使用 DeviceMessageConnector.onMessage 发布日志消息，确保消息经过完整流程（类似 ParallelTcpDeviceMessageCodec 中发送 DeviceOnlineMessage 的方式）
+                // DeviceMessageConnector.onMessage 会：
+                // 1. 添加 uid header
+                // 2. 从设备注册中心获取配置（包括 productId）并设置到消息 header 中
+                // 3. 创建正确的 topic（例如：/device/{productId}/{deviceId}/message/send/function）
+                // 4. 发布到 EventBus，这样 TimeSeriesMessageWriterConnector 就能订阅并保存日志
+                deviceMessageConnector.onMessage(logMessage)
+                    .doOnSuccess(v -> log.debug("功能调用消息已通过DeviceMessageConnector发布到EventBus用于日志记录: deviceId={}, functionId={}, messageId={}", 
+                        deviceId, functionId, messageId))
+                    .doOnError(err -> log.warn("功能调用消息通过DeviceMessageConnector发布到EventBus失败: deviceId={}, functionId={}, messageId={}, error={}", 
+                        deviceId, functionId, messageId, err.getMessage()))
+                    // 异步发布日志消息，不阻塞主流程
+                    .subscribe();
+                
+                return sender
+                    .send()
+                    .doOnSubscribe(subscription -> {
+                        log.info("功能调用消息已订阅等待回复: deviceId={}, functionId={}, waitStartTime={}", 
+                            deviceId, functionId, System.currentTimeMillis());
+                    })
+                    .doOnNext(reply -> {
+                        long replyElapsed = System.currentTimeMillis() - sendTime;
+                        log.info("收到功能调用回复: deviceId={}, functionId={}, replyMessageId={}, elapsedTime={}ms", 
+                            deviceId, functionId, reply.getMessageId(), replyElapsed);
+                    })
+                    .doOnError(error -> {
+                        long errorElapsed = System.currentTimeMillis() - sendTime;
+                        log.error("功能调用消息发送/等待回复失败: deviceId={}, functionId={}, elapsedTime={}ms, error={}", 
+                            deviceId, functionId, errorElapsed, error.getMessage(), error);
+                    });
+            })
+            .flatMap(convertReply ? mapFunctionReply() : Mono::just)
+            .doOnNext(result -> {
+                long totalElapsed = System.currentTimeMillis() - startTime;
+                log.info("设备功能调用成功: deviceId={}, functionId={}, result={}, totalElapsedTime={}ms", 
+                    deviceId, functionId, result, totalElapsed);
+            })
+            .doOnError(error -> {
+                long totalElapsed = System.currentTimeMillis() - startTime;
+                if (error instanceof DeviceOperationException) {
+                    DeviceOperationException deviceError = (DeviceOperationException) error;
+                    log.error("设备功能调用失败: deviceId={}, functionId={}, errorCode={}, errorMessage={}, totalElapsedTime={}ms", 
+                        deviceId, functionId, deviceError.getCode(), deviceError.getMessage(), totalElapsed, error);
+                } else {
+                    log.error("设备功能调用异常: deviceId={}, functionId={}, error={}, totalElapsedTime={}ms", 
+                        deviceId, functionId, error.getMessage(), totalElapsed, error);
+                }
+            });
 
 
     }
@@ -821,6 +948,52 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
                           .map(Tuple2::getT2)
                           .as(this::save))
             ).map(SaveResult::getTotal);
+    }
+
+    /**
+     * 转换功能调用回复为标准格式：{code: string, message: string, data: {}}
+     */
+    private static Function<FunctionInvokeMessageReply, Mono<Map<String, Object>>> mapFunctionReply() {
+        return reply -> {
+            Map<String, Object> result = new HashMap<>();
+            
+            if (ErrorCode.REQUEST_HANDLING.name().equals(reply.getCode())) {
+                throw new DeviceOperationException(ErrorCode.REQUEST_HANDLING, reply.getMessage());
+            }
+            
+            if (!reply.isSuccess()) {
+                // 失败情况
+                String errorCode = reply.getCode() != null ? reply.getCode() : "error.reply_is_error";
+                String errorMessage = reply.getMessage();
+                if (StringUtils.isEmpty(errorMessage)) {
+                    errorMessage = "功能调用失败";
+                }
+                result.put("code", errorCode);
+                result.put("message", errorMessage);
+                result.put("data", new HashMap<>());
+            } else {
+                // 成功情况
+                result.put("code", "success");
+                result.put("message", "功能调用成功");
+                // data字段包含功能输出结果（设备返回的原始output）
+                // 注意：data中可能包含设备层面的状态字段（如result、message），
+                // 这些是设备业务数据的一部分，与API层面的code/message不同
+                Object output = reply.getOutput();
+                if (output == null) {
+                    result.put("data", new HashMap<>());
+                } else if (output instanceof Map) {
+                    // 直接使用设备的output作为data
+                    result.put("data", output);
+                } else {
+                    // 如果不是Map类型，包装在data中
+                    Map<String, Object> data = new HashMap<>();
+                    data.put("output", output);
+                    result.put("data", data);
+                }
+            }
+            
+            return Mono.just(result);
+        };
     }
 
     private static <R extends DeviceMessageReply, T> Function<R, Mono<T>> mapReply(Function<R, T> function) {

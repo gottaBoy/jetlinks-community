@@ -25,7 +25,6 @@ import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.ezorm.rdb.metadata.RDBTableMetadata;
 import org.hswebframework.ezorm.rdb.operator.DatabaseOperator;
-import org.hswebframework.web.exception.BusinessException;
 import org.jetlinks.core.utils.Reactors;
 import org.jetlinks.core.utils.SerializeUtils;
 import org.jetlinks.community.buffer.BufferProperties;
@@ -144,7 +143,16 @@ public class DefaultTimescaleDBDataWriter implements TimescaleDBDataWriter, Comm
             .getMetadata()
             .getTableOrViewReactive(metric, false)
             .cast(RDBTableMetadata.class)
-            .switchIfEmpty(Mono.error(() -> new BusinessException.NoStackTrace("metric [" + metric + "] not found")))
+            .switchIfEmpty(Mono.defer(() -> {
+                // 表不存在时，记录警告但不抛出错误（避免影响核心功能）
+                // 这通常发生在 metric 元数据还未注册完成时
+                Logger logger = log;
+                logger.warn("metric [{}] not found in TimescaleDB, skip saving data. " +
+                           "This may happen if the metric metadata has not been registered yet. " +
+                           "The metric will be automatically registered when TimeSeriesMeterRegistry starts. " +
+                           "Data count: {}", metric, data.size());
+                return Mono.empty(); // 返回空，不抛出错误
+            }))
             .flatMap(table -> database
                 .dml()
                 .upsert(table)

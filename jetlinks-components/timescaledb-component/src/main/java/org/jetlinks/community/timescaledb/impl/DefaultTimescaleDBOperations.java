@@ -38,6 +38,11 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import org.hswebframework.ezorm.rdb.executor.SqlRequest;
+import org.hswebframework.ezorm.rdb.executor.wrapper.ResultWrapper;
+import org.reactivestreams.Publisher;
 
 import javax.annotation.Nonnull;
 import java.util.Map;
@@ -61,9 +66,43 @@ public class DefaultTimescaleDBOperations implements TimescaleDBOperations, Appl
         if (properties.isSharedSpring() && context != null) {
             //使用spring共享数据源
             ReactiveSqlExecutor sqlExecutor = context.getBean(ReactiveSqlExecutor.class);
+
+            // 创建包装器来处理Long到Integer的转换问题
+            ReactiveSqlExecutor wrappedExecutor = new ReactiveSqlExecutor() {
+                @Override
+                public Mono<Integer> update(Publisher<SqlRequest> request) {
+                    return sqlExecutor.update(request)
+                        .cast(Number.class)
+                        .map(result -> {
+                            // Handle Long to Integer conversion for PostgreSQL R2DBC
+                            if (result instanceof Long longValue) {
+                                // 安全检查：确保Long值在Integer范围内
+                                if (longValue > Integer.MAX_VALUE) {
+                                    return Integer.MAX_VALUE;
+                                }
+                                if (longValue < Integer.MIN_VALUE) {
+                                    return Integer.MIN_VALUE;
+                                }
+                                return longValue.intValue();
+                            }
+                            return result.intValue();
+                        });
+                }
+
+                @Override
+                public Mono<Void> execute(Publisher<SqlRequest> request) {
+                    return sqlExecutor.execute(request);
+                }
+
+                @Override
+                public <E> Flux<E> select(Publisher<SqlRequest> request, ResultWrapper<E, ?> wrapper) {
+                    return sqlExecutor.select(request, wrapper);
+                }
+            };
+
             RDBDatabaseMetadata database = new RDBDatabaseMetadata(Dialect.POSTGRES);
-            database.addFeature(sqlExecutor);
-            database.addFeature(ReactiveSyncSqlExecutor.of(sqlExecutor));
+            database.addFeature(wrappedExecutor);
+            database.addFeature(ReactiveSyncSqlExecutor.of(wrappedExecutor));
 
             RDBSchemaMetadata schema = TimescaleDBDialectProvider.GLOBAL.createSchema(properties.getSchema());
             database.addSchema(schema);

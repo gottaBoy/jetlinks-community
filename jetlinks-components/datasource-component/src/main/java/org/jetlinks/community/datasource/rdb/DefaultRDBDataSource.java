@@ -238,6 +238,21 @@ public class DefaultRDBDataSource extends AbstractDataSource<RDBDataSourceProper
             public Mono<Integer> update(Publisher<SqlRequest> request) {
                 return super
                     .update(request)
+                    .cast(Number.class)
+                    .map(result -> {
+                        // Handle Long to Integer conversion for PostgreSQL R2DBC
+                        if (result instanceof Long longValue) {
+                            // 安全检查：确保Long值在Integer范围内
+                            if (longValue > Integer.MAX_VALUE) {
+                                return Integer.MAX_VALUE;
+                            }
+                            if (longValue < Integer.MIN_VALUE) {
+                                return Integer.MIN_VALUE;
+                            }
+                            return longValue.intValue();
+                        }
+                        return result.intValue();
+                    })
                     .as(transactionalOperator::transactional);
             }
 

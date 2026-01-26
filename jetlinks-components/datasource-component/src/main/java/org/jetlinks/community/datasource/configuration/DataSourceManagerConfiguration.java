@@ -16,7 +16,6 @@
 package org.jetlinks.community.datasource.configuration;
 
 import org.jetlinks.community.datasource.*;
-import org.jetlinks.community.datasource.*;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;

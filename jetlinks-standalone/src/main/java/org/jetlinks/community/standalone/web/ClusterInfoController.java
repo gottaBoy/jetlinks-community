@@ -29,7 +29,7 @@ import reactor.core.publisher.Flux;
 @RequestMapping("/cluster")
 @RestController
 @Authorize
-@Tag(name = "系统管理")
+@Tag(name = "集群管理")
 public class ClusterInfoController {
 
     @Autowired

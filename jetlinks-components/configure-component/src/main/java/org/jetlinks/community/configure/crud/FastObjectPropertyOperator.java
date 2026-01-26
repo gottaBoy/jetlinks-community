@@ -51,7 +51,7 @@ public class FastObjectPropertyOperator implements ObjectPropertyOperator {
         return new SingleValueMap<>();
     }
 
-    @Override
+//    @Override
     public int compare(Object left, Object right) {
         return CompareUtils.compare(left, right);
     }

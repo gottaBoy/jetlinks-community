@@ -16,12 +16,14 @@
 package org.jetlinks.community.utils;
 
 import lombok.*;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.jetlinks.core.message.MessageType;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Builder
 @AllArgsConstructor
 @NoArgsConstructor
@@ -87,20 +89,37 @@ public class MessageTypeMatcher {
     }
 
     public boolean match(MessageType type) {
+        // 延迟初始化：如果 includesMask 和 excludesMask 都为 0，且 includes 或 excludes 不为空，则初始化
+        // 这可以处理 Spring Boot 配置绑定直接设置字段而不调用 setter 的情况
+        if (includesMask == 0 && excludesMask == 0 && 
+            (!CollectionUtils.isEmpty(includes) || !CollectionUtils.isEmpty(excludes))) {
+            init();
+        }
+        
         long mask = 1L << type.ordinal();
+        boolean result;
         if (includesMask != 0) {
             boolean include = (includesMask & mask) != 0;
 
             if (excludeFirst && excludesMask != 0) {
-                return include && (excludesMask & mask) == 0;
+                result = include && (excludesMask & mask) == 0;
+            } else {
+                result = include;
             }
-
-            return include;
-
+        } else if (excludesMask != 0) {
+            result = (excludesMask & mask) == 0;
+        } else {
+            result = true;
         }
-        if (excludesMask != 0) {
-            return (excludesMask & mask) == 0;
+        
+        // 调试日志：特别记录 EVENT、ONLINE、OFFLINE 消息类型的匹配信息
+        if (type == org.jetlinks.core.message.MessageType.EVENT || 
+            type == org.jetlinks.core.message.MessageType.ONLINE ||
+            type == org.jetlinks.core.message.MessageType.OFFLINE) {
+            log.info("[MessageTypeMatcher] match: type={}, includes={}, excludes={}, includesMask={}, excludesMask={}, result={}", 
+                type, includes, excludes, includesMask, excludesMask, result);
         }
-        return true;
+        
+        return result;
     }
 }

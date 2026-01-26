@@ -846,7 +846,14 @@ public class DeviceInstanceController implements
                                    @PathVariable String functionId,
                                    @RequestBody Mono<Map<String, Object>> properties) {
 
-        return properties.flatMapMany(props -> service.invokeFunction(deviceId, functionId, props));
+        return properties
+            .doOnNext(props -> log.info("收到功能调用请求: deviceId={}, functionId={}, properties={}", 
+                deviceId, functionId, props))
+            .flatMapMany(props -> service.invokeFunction(deviceId, functionId, props, false))  // 启用 convertReply，返回简化格式
+            .doOnError(error -> {
+                log.error("功能调用API异常: deviceId={}, functionId={}, error={}", 
+                    deviceId, functionId, error.getMessage(), error);
+            });
     }
 
     @PostMapping("/{deviceId:.+}/agg/_query")

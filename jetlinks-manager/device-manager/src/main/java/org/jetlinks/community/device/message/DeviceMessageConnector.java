@@ -240,7 +240,56 @@ public class DeviceMessageConnector implements DecodedClientMessageHandler {
                         .flatMap(configGetter)
                         .defaultIfEmpty(emptyValues)
                         .flatMapIterable(configs -> {
+                            // 保护 ignoreLog 和 ignoreStorage，防止被设备配置覆盖
+                            // 记录添加配置前的状态
+                            boolean ignoreLogBefore = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
+                            boolean ignoreStorageBefore = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreStorage);
+                            
+                            // 记录 EVENT、FUNCTION 消息在添加配置前的状态
+                            if (deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT ||
+                                deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION ||
+                                deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION_REPLY) {
+                                log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置前: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                    deviceId, deviceMessage.getMessageType(), ignoreLogBefore, ignoreStorageBefore);
+                            }
+                            
+                            // 添加设备配置到 header（可能会覆盖某些 header）
                             configs.getAllValues().forEach(deviceMessage::addHeader);
+                            
+                            // 检查添加配置后是否被覆盖
+                            boolean ignoreLogAfter = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
+                            boolean ignoreStorageAfter = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreStorage);
+                            
+                            // 如果 ignoreLog 或 ignoreStorage 被设备配置覆盖为 true，强制恢复为 false
+                            // 这样可以确保消息不会被意外忽略日志或存储
+                            if (ignoreLogAfter && !ignoreLogBefore) {
+                                // 如果之前是 false（或未设置，默认 false），但设备配置设置为 true，恢复为 false
+                                deviceMessage.addHeader(org.jetlinks.core.message.Headers.ignoreLog, false);
+                                log.warn("DeviceMessageConnector.createDeviceMessageTopic 检测到 ignoreLog 被设备配置覆盖为 true，已恢复为 false: deviceId={}, messageType={}", 
+                                    deviceId, deviceMessage.getMessageType());
+                            } else if (ignoreLogBefore != ignoreLogAfter) {
+                                // 如果之前明确设置了值，但被覆盖了，恢复之前的值
+                                deviceMessage.addHeader(org.jetlinks.core.message.Headers.ignoreLog, ignoreLogBefore);
+                            }
+                            
+                            if (ignoreStorageAfter && !ignoreStorageBefore) {
+                                deviceMessage.addHeader(org.jetlinks.core.message.Headers.ignoreStorage, false);
+                                log.warn("DeviceMessageConnector.createDeviceMessageTopic 检测到 ignoreStorage 被设备配置覆盖为 true，已恢复为 false: deviceId={}, messageType={}", 
+                                    deviceId, deviceMessage.getMessageType());
+                            } else if (ignoreStorageBefore != ignoreStorageAfter) {
+                                deviceMessage.addHeader(org.jetlinks.core.message.Headers.ignoreStorage, ignoreStorageBefore);
+                            }
+                            
+                            // 记录 EVENT、FUNCTION 消息在添加配置后的状态
+                            if (deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT ||
+                                deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION ||
+                                deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION_REPLY) {
+                                boolean finalIgnoreLog = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
+                                boolean finalIgnoreStorage = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreStorage);
+                                log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置后: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                    deviceId, deviceMessage.getMessageType(), finalIgnoreLog, finalIgnoreStorage);
+                            }
+                            
                             String productId = deviceMessage.getHeader(PropertyConstants.productId).orElse("null");
                             String topic = createDeviceMessageTopic(productId, deviceId, deviceMessage);
                             List<String> topics = new ArrayList<>(2);
@@ -290,10 +339,26 @@ public class DeviceMessageConnector implements DecodedClientMessageHandler {
         if (null == message) {
             return Mono.empty();
         }
+        // 记录 EVENT 消息在发布前的状态
+        if (message instanceof DeviceMessage && ((DeviceMessage) message).getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            DeviceMessage deviceMessage = (DeviceMessage) message;
+            boolean ignoreLog = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
+            String productId = deviceMessage.getHeader(PropertyConstants.productId).map(String::valueOf).orElse("null");
+            log.info("DeviceMessageConnector.onMessage EVENT消息发布前: deviceId={}, productId={}, ignoreLog={}, messageId={}", 
+                deviceMessage.getDeviceId(), productId, ignoreLog, deviceMessage.getMessageId());
+        }
         message.addHeaderIfAbsent(PropertyConstants.uid, IDGenerator.RANDOM.generate());
         return this
                 .getTopic(message)
-                .flatMap(topic -> eventBus.publish(topic, message).then())
+                .flatMap(topic -> {
+                    // 记录 EVENT 消息在发布时的 topic
+                    if (message instanceof DeviceMessage && ((DeviceMessage) message).getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                        DeviceMessage deviceMessage = (DeviceMessage) message;
+                        log.info("DeviceMessageConnector.onMessage EVENT消息发布到topic: deviceId={}, topic={}, messageId={}", 
+                            deviceMessage.getDeviceId(), topic, deviceMessage.getMessageId());
+                    }
+                    return eventBus.publish(topic, message).then();
+                })
                 .onErrorResume(doOnError)
                 .then();
     }
@@ -349,6 +414,12 @@ public class DeviceMessageConnector implements DecodedClientMessageHandler {
      */
     @Override
     public Mono<Boolean> handleMessage(DeviceOperator device, @Nonnull Message message) {
+        // 记录 EVENT 消息的处理入口
+        if (message instanceof DeviceMessage && ((DeviceMessage) message).getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            DeviceMessage deviceMessage = (DeviceMessage) message;
+            log.info("DeviceMessageConnector.handleMessage EVENT消息处理入口: deviceId={}, messageId={}, messageType={}", 
+                deviceMessage.getDeviceId(), deviceMessage.getMessageId(), deviceMessage.getMessageType());
+        }
         Mono<Boolean> then;
         if (message instanceof ChildDeviceMessageReply) {
             then = this

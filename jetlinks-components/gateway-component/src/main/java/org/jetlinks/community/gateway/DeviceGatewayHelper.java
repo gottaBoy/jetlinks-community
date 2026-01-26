@@ -17,6 +17,7 @@ package org.jetlinks.community.gateway;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.jetlinks.core.device.DeviceConfigKey;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
@@ -52,6 +53,7 @@ import static org.jetlinks.core.message.Headers.ignoreIfOffline;
  * @see DecodedClientMessageHandler
  * @since 1.5
  */
+@Slf4j
 @AllArgsConstructor
 @Getter
 public class DeviceGatewayHelper {
@@ -205,6 +207,13 @@ public class DeviceGatewayHelper {
         if (!StringUtils.hasText(deviceId)) {
             return Mono.empty();
         }
+        
+        // 记录 EVENT 消息的处理入口
+        if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            log.info("DeviceGatewayHelper.handleDeviceMessage EVENT消息处理入口: deviceId={}, messageId={}, messageType={}", 
+                deviceId, message.getMessageId(), message.getMessageType());
+        }
+        
         HandlerContext ctx = new HandlerContext();
 
         boolean doHandle = true;
@@ -256,7 +265,18 @@ public class DeviceGatewayHelper {
         }
 
         if (doHandle) {
+            // 记录 EVENT 消息是否会被处理
+            if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                log.info("DeviceGatewayHelper.handleDeviceMessage EVENT消息将被处理: deviceId={}, messageId={}, doHandle={}", 
+                    deviceId, message.getMessageId(), doHandle);
+            }
             ctx.after(handleMessage(null, message));
+        } else {
+            // 记录 EVENT 消息被跳过
+            if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                log.warn("DeviceGatewayHelper.handleDeviceMessage EVENT消息被跳过: deviceId={}, messageId={}, doHandle={}", 
+                    deviceId, message.getMessageId(), doHandle);
+            }
         }
 
         return ctx
@@ -276,6 +296,12 @@ public class DeviceGatewayHelper {
     }
 
     private Mono<Void> handleMessage(DeviceOperator device, Message message) {
+        // 记录 EVENT 消息的处理入口
+        if (message instanceof DeviceMessage && ((DeviceMessage) message).getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            DeviceMessage deviceMessage = (DeviceMessage) message;
+            log.info("DeviceGatewayHelper.handleMessage EVENT消息处理入口: deviceId={}, messageId={}, messageType={}", 
+                deviceMessage.getDeviceId(), deviceMessage.getMessageId(), deviceMessage.getMessageType());
+        }
         return messageHandler
             .handleMessage(device, message)
             //转换为empty,减少触发discard

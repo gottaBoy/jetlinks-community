@@ -180,14 +180,14 @@ public class ExternalDeviceOperator implements DeviceOperator {
                 .map(ext -> new ExternalDeviceProductOperator(ext, opt)));
     }
 
-    @Override
-    public Mono<DeviceOperator> getParentDevice() {
-        return internal
-            .getParentDevice()
-            .flatMap(device -> idMapper
-                .getExternalId(PluginDataIdMapper.TYPE_DEVICE, pluginId, device.getId())
-                .map(ext -> new ExternalDeviceOperator(ext, pluginId, idMapper, device)));
-    }
+//    @Override
+//    public Mono<DeviceOperator> getParentDevice() {
+//        return internal
+//            .getParentDevice()
+//            .flatMap(device -> idMapper
+//                .getExternalId(PluginDataIdMapper.TYPE_DEVICE, pluginId, device.getId())
+//                .map(ext -> new ExternalDeviceOperator(ext, pluginId, idMapper, device)));
+//    }
 
     @Override
     public Mono<Value> getConfig(String key) {

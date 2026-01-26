@@ -32,13 +32,23 @@ public class BufferEvictionSpec {
     private int maxDeadSize = Integer.getInteger("jetlinks.buffer.dead.limit", 100_0000);
 
     //根据磁盘空间淘汰数据
-    private DataSize diskFree = DataSize.parse(System.getProperty("jetlinks.buffer.disk.free.threshold", "4GB"));
+    private DataSize diskFree;
 
     //磁盘最大使用率
     private float diskThreshold;
 
     //判断磁盘空间大小的目录
     private String diskPath = System.getProperty("jetlinks.buffer.disk.free.path", "./");
+
+    public BufferEvictionSpec() {
+        //在构造函数中初始化，避免字段初始化时抛出异常
+        try {
+            this.diskFree = DataSize.parse(System.getProperty("jetlinks.buffer.disk.free.threshold", "4GB"));
+        } catch (Exception e) {
+            //如果解析失败，使用默认值
+            this.diskFree = DataSize.ofGigabytes(4);
+        }
+    }
 
     public BufferEviction build() {
 

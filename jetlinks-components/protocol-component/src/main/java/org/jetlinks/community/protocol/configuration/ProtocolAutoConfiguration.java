@@ -104,7 +104,7 @@ public class ProtocolAutoConfiguration {
     }
 
     @Bean
-    @Profile("dev")
+    @Profile({"dev", "local"})
     public LocalProtocolSupportLoader localProtocolSupportLoader(ServiceContext context,
                                                                  ProtocolMonitorHelper helper) {
         return new LocalProtocolSupportLoader(context, helper);

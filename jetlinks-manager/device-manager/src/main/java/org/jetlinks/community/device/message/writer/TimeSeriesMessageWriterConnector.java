@@ -22,7 +22,6 @@ import org.jetlinks.community.things.data.ThingsDataWriter;
 import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.community.device.service.data.DeviceDataService;
 import org.jetlinks.community.gateway.annotation.Subscribe;
-import org.jetlinks.core.message.property.Property;
 import org.jetlinks.core.message.property.PropertyMessage;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -45,8 +44,19 @@ public class TimeSeriesMessageWriterConnector {
     @Subscribe(topics = "/device/**", id = "device-message-ts-writer", priority = 100)
     @Generated
     public Mono<Void> writeDeviceMessageToTs(DeviceMessage message) {
+        // 特别记录 EVENT 消息的处理
+        if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+            log.info("TimeSeriesMessageWriterConnector 收到 EVENT 消息: deviceId={}, messageType={}, messageId={}", 
+                message.getDeviceId(), message.getMessageType(), message.getMessageId());
+        }
         return dataService
             .saveDeviceMessage(message)
+            .doOnSuccess(v -> {
+                if (message.getMessageType() == org.jetlinks.core.message.MessageType.EVENT) {
+                    log.info("EVENT 消息保存完成: deviceId={}, messageId={}", 
+                        message.getDeviceId(), message.getMessageId());
+                }
+            })
             .then(writeToThingsDataWriter(message))
             .onErrorResume(err -> {
                 log.warn("write device message error {}", message, err);
