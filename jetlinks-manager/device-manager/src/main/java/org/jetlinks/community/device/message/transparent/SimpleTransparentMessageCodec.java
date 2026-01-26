@@ -40,6 +40,7 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.Charset;
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -157,10 +158,14 @@ public class SimpleTransparentMessageCodec implements TransparentMessageCodec {
         public Object json() {
             return ObjectMappers.parseJson(ByteBufUtil.getBytes(buffer), Object.class);
         }
+        public Object text() {
+            return new String(ByteBufUtil.getBytes(buffer), Charset.defaultCharset());
+        }
 
         public Object jsonArray() {
             return ObjectMappers.parseJsonArray(ByteBufUtil.getBytes(buffer), Object.class);
         }
+
         public Map<String, String> pathVars(String pattern, String path) {
             return TopicUtils.getPathVariables(pattern, path);
         }

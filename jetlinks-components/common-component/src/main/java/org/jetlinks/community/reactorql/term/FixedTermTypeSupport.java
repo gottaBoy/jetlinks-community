@@ -22,13 +22,19 @@ import org.hswebframework.ezorm.rdb.operator.builder.fragments.NativeSql;
 import org.hswebframework.ezorm.rdb.operator.builder.fragments.PrepareSqlFragments;
 import org.hswebframework.ezorm.rdb.operator.builder.fragments.SqlFragments;
 import org.hswebframework.web.i18n.LocaleUtils;
+import org.jetlinks.community.utils.ConverterUtils;
+import org.jetlinks.community.utils.ReactorUtils;
 import org.jetlinks.core.metadata.DataType;
 import org.jetlinks.core.metadata.types.*;
-import org.jetlinks.community.utils.ConverterUtils;
+import org.jetlinks.core.utils.Reactors;
+import org.jetlinks.reactor.ql.supports.filter.BetweenFilter;
+import org.jetlinks.reactor.ql.supports.filter.LikeFilter;
+import org.jetlinks.reactor.ql.utils.CastUtils;
+import org.jetlinks.reactor.ql.utils.CompareUtils;
+import reactor.core.publisher.Mono;
 
-import java.util.Collection;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -40,6 +46,11 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public boolean isSupported(DataType type) {
             return !type.getType().equals(ArrayType.ID) && super.isSupported(type);
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) == 0;
+        }
     },
     neq("不等于", "neq") {
         @Override
@@ -47,11 +58,20 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
             return !type.getType().equals(ArrayType.ID) && super.isSupported(type);
         }
 
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) != 0;
+        }
     },
     notnull("不为空", "notnull", false) {
         @Override
         protected String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s%s", property, getName());
+        }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return actual != null;
         }
     },
     isnull("为空", "isnull", false) {
@@ -59,14 +79,49 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s%s", property, getName());
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return actual == null;
+        }
+
     },
 
-    gt("大于", "gt", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID),
-    gte("大于等于", "gte", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID),
-    lt("小于", "lt", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID),
-    lte("小于等于", "lte", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID),
+    gt("大于", "gt", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID) {
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) > 0;
+        }
+    },
+    gte("大于等于", "gte", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID) {
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) >= 0;
+        }
+    },
+    lt("小于", "lt", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID) {
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) < 0;
+        }
+    },
+    lte("小于等于", "lte", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID) {
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return CompareUtils.compare(expect, actual) <= 0;
+        }
+    },
 
     btw("在...之间", "btw", DateTimeType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID) {
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            List<Object> castArray = ConverterUtils.convertToList(expect);
+            if (castArray.size() > 1) {
+                return BetweenFilter.predicate(actual, castArray.get(0), castArray.get(1));
+            }
+            return false;
+        }
+
         @Override
         protected Object convertValue(Object val, Term term) {
             return val;
@@ -97,6 +152,16 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s不在%s之间", property, createValueDesc(expect));
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            List<Object> castArray = ConverterUtils.convertToList(expect);
+            if (castArray.size() > 1) {
+                return !BetweenFilter.predicate(actual, castArray.get(0), castArray.get(1));
+            }
+            return true;
+        }
+
     },
     in("在...之中", "in", StringType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID, EnumType.ID) {
         @Override
@@ -112,6 +177,14 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         @Override
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s在%s之中", property, createValueDesc(expect));
+        }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return ConverterUtils
+                .convertToList(expect)
+                .stream()
+                .anyMatch(o -> CompareUtils.compare(o, actual) == 0);
         }
     },
     nin("不在...之中", "nin", StringType.ID, ShortType.ID, IntType.ID, LongType.ID, FloatType.ID, DoubleType.ID, EnumType.ID) {
@@ -129,6 +202,14 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s不在%s之中", property, createValueDesc(expect));
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return ConverterUtils
+                .convertToList(expect)
+                .stream()
+                .noneMatch(o -> CompareUtils.compare(o, actual) == 0);
+        }
     },
     contains_all("全部包含在...之中", "contains_all", ArrayType.ID) {
         @Override
@@ -144,6 +225,17 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         @Override
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s全部包含在%s之中", property, createValueDesc(expect));
+        }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            if (actual == null) {
+                return false;
+            }
+            TreeSet<Object> left =
+                CastUtils.castCollection(expect, new TreeSet<>(CompareUtils::compare));
+
+            return left.containsAll(ConverterUtils.convertToList(actual));
         }
     },
     contains_any("任意包含在...之中", "contains_any", ArrayType.ID) {
@@ -161,6 +253,17 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s任意包含在%s之中", property, createValueDesc(expect));
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            TreeSet<Object> left =
+                CastUtils.castCollection(expect, new TreeSet<>(CompareUtils::compare));
+
+            return ConverterUtils
+                .convertToList(actual)
+                .stream()
+                .anyMatch(val -> CompareUtils.contains(left, val));
+        }
     },
     not_contains("不包含在...之中", "not_contains", ArrayType.ID) {
         @Override
@@ -177,6 +280,17 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s不包含在%s之中", property, createValueDesc(expect));
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            TreeSet<Object> left =
+                CastUtils.castCollection(expect, new TreeSet<>(CompareUtils::compare));
+
+            return ConverterUtils
+                .convertToList(actual)
+                .stream()
+                .noneMatch(val -> CompareUtils.contains(left, val));
+        }
     },
 
     like("包含字符", "str_like", StringType.ID) {
@@ -192,11 +306,24 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
             }
             return val;
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            if (expect instanceof String && !((String) expect).contains("%")) {
+                expect = "%" + expect + "%";
+            }
+            return LikeFilter.doTest(false, actual, expect);
+        }
     },
     nlike("不包含字符", "str_nlike", StringType.ID) {
         @Override
         protected Object convertValue(Object val, Term term) {
             return like.convertValue(val, term);
+        }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            return LikeFilter.doTest(true, actual, expect);
         }
     },
 
@@ -216,6 +343,13 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s距离当前时间大于%s秒", property, expect);
         }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            long cast = CastUtils.castNumber(expect).longValue();
+            long now = System.currentTimeMillis();
+            return cast > now / 1000;
+        }
     },
     time_lt_now("距离当前时间小于...秒", "time_lt_now", DateTimeType.ID) {
         @Override
@@ -231,6 +365,13 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
         @Override
         public String createDefaultDesc(String property, Object expect, Object actual) {
             return String.format("%s距离当前时间小于%s秒", property, expect);
+        }
+
+        @Override
+        public boolean matchBlocking(Object expect, Object actual) {
+            long cast = CastUtils.castNumber(expect).longValue();
+            long now = System.currentTimeMillis();
+            return cast < now / 1000;
         }
     };
 
@@ -343,4 +484,10 @@ public enum FixedTermTypeSupport implements TermTypeSupport {
             actual
         );
     }
+
+    @Override
+    public Mono<Boolean> match(Object expect, Object actual) {
+        return matchBlocking(expect, actual) ? Reactors.ALWAYS_TRUE : Reactors.ALWAYS_FALSE;
+    }
+
 }

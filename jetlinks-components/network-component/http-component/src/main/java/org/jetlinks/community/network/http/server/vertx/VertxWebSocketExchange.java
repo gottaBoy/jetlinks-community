@@ -76,6 +76,7 @@ public class VertxWebSocketExchange implements WebSocketExchange {
 
     @Getter
     private final String id;
+    private int handleCount;
 
     public VertxWebSocketExchange(ServerWebSocket serverWebSocket) {
         this.serverWebSocket = serverWebSocket;
@@ -84,6 +85,16 @@ public class VertxWebSocketExchange implements WebSocketExchange {
         address = new InetSocketAddress(socketAddress.host(), socketAddress.port());
         this.id = IDGenerator.RANDOM.generate();
     }
+
+
+    void mark() {
+        handleCount++;
+    }
+
+    int handleCount() {
+        return handleCount;
+    }
+
 
     @Override
     public Optional<InetSocketAddress> getRemoteAddress() {

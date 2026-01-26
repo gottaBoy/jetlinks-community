@@ -305,6 +305,8 @@ public class DeviceGatewayHelper {
                     if (message.getHeader(Headers.keepOnline).orElse(false)) {
                         int timeout = message.getHeaderOrDefault(Headers.keepOnlineTimeoutSeconds);
                         newSession = new KeepOnlineSession(newSession, Duration.ofSeconds(timeout));
+                    }else {
+                        applySessionKeepaliveTimeout(message,newSession);
                     }
                     return newSession;
                 }));

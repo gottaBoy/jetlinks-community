@@ -22,7 +22,7 @@
     <include resource="org/springframework/boot/logging/logback/file-appender.xml"/>
 
     <logger name="org.springframework.context.support.PostProcessorRegistrationDelegate$BeanPostProcessorChecker" level="ERROR"/>
-    <logger name="org.jetlinks.pro.timescaledb.impl.DefaultTimescaleDBDataWriter" level="WARN" additivity="false">
+    <logger name="org.jetlinks.community.timescaledb.impl.DefaultTimescaleDBDataWriter" level="WARN" additivity="false">
         <appender-ref ref="AsyncConsoleAppender"/>
         <appender-ref ref="FILE"/>
     </logger>

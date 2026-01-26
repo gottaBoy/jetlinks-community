@@ -36,9 +36,13 @@ import org.springframework.cache.annotation.EnableCaching;
 public class JetLinksApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(JetLinksApplication.class, args);
+        try {
+            SpringApplication.run(JetLinksApplication.class, args);
+        } catch (Throwable error) {
+            System.err.println("startup failed!");
+            System.exit(1);
+        }
     }
-
 
 
 }

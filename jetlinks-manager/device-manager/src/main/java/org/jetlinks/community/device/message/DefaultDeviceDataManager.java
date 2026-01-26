@@ -235,6 +235,7 @@ public class DefaultDeviceDataManager implements DeviceDataManager {
                         "/device/*/" + deviceId + "/message/property/read,write/reply")
                 .broker()
                 .local()
+                .priority(Integer.MIN_VALUE)
                 .build();
 
             disposable = eventBus

@@ -111,6 +111,7 @@ public class DefaultAlarmHandler implements AlarmHandler {
                 AlarmRecordEntity record = ofRecord(cache, alarmInfo);
                 AlarmResult result = ofRecordCache(cache);
                 AlarmHistoryInfo historyInfo = createHistory(record, alarmInfo);
+                result.setRecordId(recordId);
                 //时间滞后的告警数据，仅记录日志.
                 if (!cache.isEffectiveTrigger(alarmInfo.getAlarmTime())) {
                     return historyService
@@ -169,8 +170,11 @@ public class DefaultAlarmHandler implements AlarmHandler {
 
     @Override
     public Mono<RelieveResult> relieveAlarm(RelieveInfo relieveInfo) {
+        String recordId = createRecordId(relieveInfo);
+        ReactiveLock lock = ReactiveLockHolder
+            .getLock("triggerAlarm:" + recordId);
         return this
-            .getRecordCache(createRecordId(relieveInfo))
+            .getRecordCache(recordId)
             .flatMap(cache -> {
                 if (relieveInfo.getRelieveTime() == null) {
                     relieveInfo.setRelieveTime(System.currentTimeMillis());
@@ -179,27 +183,28 @@ public class DefaultAlarmHandler implements AlarmHandler {
                 AlarmRecordEntity record = this.ofRecord(cache, relieveInfo);
                 AlarmHistoryInfo historyInfo = this.createHistory(record, relieveInfo);
                 RelieveResult relieveResult = createRelieveResult(record, relieveInfo);
+                relieveResult.setRecordId(record.getId());
                 //无效解除告警,更新解除告警时间
                 if (!cache.isEffectiveRelieve(relieveInfo.getRelieveTime())) {
                     return this.updateRecordCache(
-                            record.getId(),
-                            relieveTime,
-                            _cache -> _cache.withRelievedTime(relieveTime),
-                            false, true)
-                        .thenReturn(relieveResult);
+                                   record.getId(),
+                                   relieveTime,
+                                   _cache -> _cache.withRelievedTime(relieveTime),
+                                   false, true)
+                               .thenReturn(relieveResult);
                 }
                 return Mono
                     .zip(alarmRecordService.changeRecordState(
-                            StringUtils.hasText(relieveInfo.getAlarmRelieveType())
-                                ? relieveInfo.getAlarmRelieveType()
-                                : AlarmHandleType.system.getValue(),
-                            AlarmRecordState.normal,
-                            record.getId()),
-                        this.updateRecordCache(record.getId(),
-                            relieveTime,
-                            _cache -> _cache.relieved(relieveTime),
-                            false, true),
-                        (total, ignore) -> total)
+                             StringUtils.hasText(relieveInfo.getAlarmRelieveType())
+                                 ? relieveInfo.getAlarmRelieveType()
+                                 : AlarmHandleType.system.getValue(),
+                             AlarmRecordState.normal,
+                             record.getId()),
+                         this.updateRecordCache(record.getId(),
+                                                relieveTime,
+                                                _cache -> _cache.relieved(relieveTime),
+                                                false, true),
+                         (total, ignore) -> total)
                     .flatMap(total -> {
                         //如果有数据被更新说明是正在告警中
                         if (total > 0) {
@@ -212,7 +217,8 @@ public class DefaultAlarmHandler implements AlarmHandler {
                         }
                         return Mono.empty();
                     });
-            });
+            })
+            .as(lock::lock);
     }
 
     public Mono<Void> publishAlarmHandleHistory(AlarmInfo alarmInfo, AlarmHandleInfo info) {
@@ -339,9 +345,9 @@ public class DefaultAlarmHandler implements AlarmHandler {
 
     private Mono<Void> publishAlarmLog(AlarmHistoryInfo historyInfo, AlarmInfo alarmInfo) {
         String topic = Topics.alarmLog(historyInfo.getTargetType(),
-            historyInfo.getTargetId(),
-            historyInfo.getAlarmConfigId(),
-            historyInfo.getAlarmRecordId());
+                                       historyInfo.getTargetId(),
+                                       historyInfo.getAlarmConfigId(),
+                                       historyInfo.getAlarmRecordId());
 
         eventPublisher.publishEvent(historyInfo);
         return doPublishAlarmInfo(topic, historyInfo, alarmInfo);
@@ -351,9 +357,9 @@ public class DefaultAlarmHandler implements AlarmHandler {
                                              AlarmRecordEntity record) {
         return this
             .updateRecordCache(record.getId(),
-                result.getAlarmTime(),
-                cache -> cache.with(result),
-                true, false)
+                               result.getAlarmTime(),
+                               cache -> cache.with(result),
+                               true, false)
             .thenReturn(result);
     }
 
@@ -361,13 +367,13 @@ public class DefaultAlarmHandler implements AlarmHandler {
     private AlarmHandleInfo createRelieveAlarmHandleInfo(RelieveInfo relieveInfo, AlarmRecordEntity record) {
         AlarmHandleInfo alarmHandleInfo = createAlarmHandleInfo(record);
         alarmHandleInfo.setHandleTime(relieveInfo.getRelieveTime() == null
-            ? System.currentTimeMillis() : relieveInfo.getRelieveTime());
+                                          ? System.currentTimeMillis() : relieveInfo.getRelieveTime());
         alarmHandleInfo.setState(AlarmRecordState.normal);
         alarmHandleInfo.setType(relieveInfo.getAlarmRelieveType() == null ?
-            AlarmHandleType.system.getValue() : relieveInfo.getAlarmRelieveType());
+                                    AlarmHandleType.system.getValue() : relieveInfo.getAlarmRelieveType());
         alarmHandleInfo.setDescribe(StringUtils.hasText(relieveInfo.getDescribe())
-            ? relieveInfo.getDescribe()
-            : getLocaleDescribe());
+                                        ? relieveInfo.getDescribe()
+                                        : getLocaleDescribe());
         alarmHandleInfo.setHandleState(AlarmHandleState.processed);
         return alarmHandleInfo;
     }
@@ -385,8 +391,11 @@ public class DefaultAlarmHandler implements AlarmHandler {
         return LocaleUtils.resolveMessage("message.scene_triggered_relieve_alarm", "场景触发解除告警");
     }
 
-
     private String createRecordId(AlarmInfo alarmInfo) {
+        return AlarmRecordEntity.generateId(alarmInfo.getTargetId(), alarmInfo.getTargetType(), alarmInfo.getAlarmConfigId());
+    }
+
+    private String createRecordId(RelieveInfo alarmInfo) {
         return AlarmRecordEntity.generateId(alarmInfo.getTargetId(), alarmInfo.getTargetType(), alarmInfo.getAlarmConfigId());
     }
 
@@ -473,17 +482,17 @@ public class DefaultAlarmHandler implements AlarmHandler {
         //告警在解除最近一次告警之后才算有效
         public boolean isEffectiveTrigger(long timestamp) {
             //只获取时间不可行或者告警仍在运行也需要解除
-            return timestamp > relieve.reliveTime || !trigger.isAlarming();
+            return timestamp > relieve.reliveTime || !trigger.isAlarming() || trigger.isCacheMiss();
         }
 
         //解除告警在最近一次告警时间之后   并且  当前告警正在告警中才算有效
         public boolean isEffectiveRelieve(long timestamp) {
-            return timestamp > trigger.alarmTime && trigger.isAlarming();
+            return (timestamp > trigger.alarmTime && trigger.isAlarming()) || trigger.isCacheMiss();
         }
 
         //有效的触发时间
         public boolean isEffectiveTime(long timestamp) {
-            return timestamp > relieve.reliveTime && timestamp > trigger.alarmTime;
+            return (timestamp > relieve.reliveTime && timestamp > trigger.alarmTime) || trigger.isCacheMiss();
         }
     }
 
@@ -498,6 +507,10 @@ public class DefaultAlarmHandler implements AlarmHandler {
         long alarmTime;
         long lastAlarmTime;
 
+
+        public boolean isCacheMiss() {
+            return state == 0x00 && alarmTime == 0L && lastAlarmTime == 0L;
+        }
 
         public boolean isAlarming() {
             return state == stateAlarming;
@@ -547,7 +560,6 @@ public class DefaultAlarmHandler implements AlarmHandler {
             lastAlarmTime = in.readLong();
         }
     }
-
 
     @Getter
     @Setter

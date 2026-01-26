@@ -17,7 +17,6 @@ package org.jetlinks.community.auth.initialize;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
-import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.hswebframework.web.authorization.DefaultDimensionType;
 import org.hswebframework.web.authorization.Permission;
 import org.hswebframework.web.authorization.events.AuthorizationInitializeEvent;
@@ -71,22 +70,16 @@ public class MenuAuthenticationInitializeService {
                     permissionCacheHelper
                         .getPermissionCaching(),
                     // T2: 菜单定义列表
-                    menuService
-                        .createQuery()
-                        .where(MenuEntity::getStatus, 1)
-                        .fetch()
-                        .collectList(),
+                    menuCaching,
                     // T3: 角色赋予的菜单列表
                     menuService
-                        .getGrantedMenus(QueryParamEntity.of(), event
-                            .getAuthentication()
-                            .getDimensions())
+                        .getGrantedMenus(event.getAuthentication().getDimensions(),
+                                         menuCaching)
                         .collectList()
-                        .filter(CollectionUtils::isNotEmpty)
                 )
                 .<Permission>flatMapIterable(tp3 -> {
                     Map<String, PermissionEntity> permissions = tp3.getT1();
-                    List<MenuEntity> menus = tp3.getT2();
+                    List<MenuEntity> menus = new ArrayList<>(tp3.getT2().values());
                     List<MenuView> grantedMenus = tp3.getT3();
                     MenuGrantRequest request = new MenuGrantRequest();
                     request.setTargetType(DefaultDimensionType.role.getId());

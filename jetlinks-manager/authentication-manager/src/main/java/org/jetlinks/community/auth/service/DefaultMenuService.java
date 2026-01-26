@@ -15,6 +15,7 @@
  */
 package org.jetlinks.community.auth.service;
 
+import com.google.common.cache.CacheBuilder;
 import lombok.Generated;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
@@ -50,6 +51,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.math.MathFlux;
 
+import java.time.Duration;
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -161,6 +163,48 @@ public class DefaultMenuService
             .as(this::convertToView);
     }
 
+    final Map<List<String>, Flux<MenuView>> grantedCaching =
+        CacheBuilder
+            .newBuilder()
+            .expireAfterAccess(Duration.ofSeconds(10))
+            .<List<String>, Flux<MenuView>>build()
+            .asMap();
+
+    public Flux<MenuView> getGrantedMenus(List<Dimension> dimensions,
+                                          Mono<Map<String, MenuEntity>> menuEntityMap) {
+        if (CollectionUtils.isEmpty(dimensions)) {
+            return Flux.empty();
+        }
+        List<String> keyList = dimensions
+            .stream()
+            .filter(this::isMenuDimension)
+            .map(dimension -> MenuBindEntity.generateTargetKey(dimension.getType().getId(), dimension.getId()))
+            .sorted()
+            .collect(Collectors.toList());
+
+        return grantedCaching
+            .computeIfAbsent(keyList,
+                             _keyList -> Flux
+                                 .defer(() -> this
+                                     .convertToView(CollectionUtils.isEmpty(_keyList)
+                                                        ? Flux.empty()
+                                                        : bindRepository
+                                                        .createQuery()
+                                                        .where()
+                                                        .in(MenuBindEntity::getTargetKey, _keyList)
+                                                        .fetch(),
+                                                    menuEntityMap))
+                                 // 缓存1秒钟,避免编辑角色或者组织时,导致大量用户权限失效并进行初始化时执行大量重复的查询.
+                                 .cache(Duration.ofSeconds(1)));
+
+
+    }
+
+    private boolean isMenuDimension(Dimension dimension) {
+        //是配置中的维度并且没有忽略
+        return properties.getDimensions().contains(dimension.getType().getId());
+    }
+
     public Flux<MenuView> getGrantedMenus(String dimensionType, String dimensionId) {
         return getGrantedMenus(dimensionType, Collections.singleton(dimensionId));
     }
@@ -176,7 +220,6 @@ public class DefaultMenuService
             .fetch()
             .as(this::convertToView);
     }
-
 
 
     private Flux<MenuView> convertToView(Flux<MenuBindEntity> entityFlux, Mono<Map<String, MenuEntity>> menuEntityMap) {

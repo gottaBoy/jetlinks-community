@@ -120,6 +120,8 @@ hsweb:
     #    allopatric-login-modes:
     #      app: offlineOther
     permission:
+        initialize:
+            enabled-dimensions: api-client
         filter:
             enabled: true # 设置为true开启权限过滤,赋权时,不能赋予比自己多的权限.
             exclude-username: admin # admin用户不受上述限制

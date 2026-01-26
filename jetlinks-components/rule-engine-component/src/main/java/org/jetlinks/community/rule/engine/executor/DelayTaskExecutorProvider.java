@@ -1,18 +1,3 @@
-/*
- * Copyright 2025 JetLinks https://www.jetlinks.cn
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package org.jetlinks.community.rule.engine.executor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,7 +24,7 @@ import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 @Slf4j
 @AllArgsConstructor
@@ -48,7 +33,6 @@ public class DelayTaskExecutorProvider implements TaskExecutorProvider {
 
     public static final String EXECUTOR = "delay";
     private final Scheduler scheduler;
-    static ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public String getExecutor() {
@@ -78,15 +62,14 @@ public class DelayTaskExecutorProvider implements TaskExecutorProvider {
                 this.disposable.dispose();
             }
             return config
-                .create(context.getInput().accept(), context, scheduler)
-                .map(context::newRuleData)
-                .flatMap(ruleData ->
-                             context
-                                 .fireEvent(RuleConstants.Event.result, ruleData)
-                                 .then(context.getOutput().write(Mono.just(ruleData)))
-                )
-                .onErrorResume(err -> context.onError(err, null))
-                .subscribe();
+                .create(context, data -> {
+                    RuleData ruleData = context.newRuleData(data);
+                    return Flux
+                        .merge(
+                            context.fireEvent(RuleConstants.Event.result, ruleData),
+                            context.getOutput().write(ruleData)
+                        ).then();
+                }, scheduler);
         }
 
         void init() {
@@ -143,8 +126,8 @@ public class DelayTaskExecutorProvider implements TaskExecutorProvider {
         //丢弃被限流的消息时触发错误事件
         private boolean errorOnDrop;
 
-        public Flux<RuleData> create(Flux<RuleData> flux, ExecutionContext context, Scheduler scheduler) {
-            return pauseType.create(this, flux, context, scheduler);
+        public Disposable create(ExecutionContext context, Function<RuleData, Mono<Void>> handler, Scheduler scheduler) {
+            return pauseType.create(this, context, handler, scheduler);
         }
 
         public static DelayTaskExecutorConfig of(Map<String, Object> configuration) {
@@ -156,36 +139,52 @@ public class DelayTaskExecutorProvider implements TaskExecutorProvider {
         delayv {//上游节点指定固定延迟
 
             @Override
-            Flux<RuleData> create(DelayTaskExecutorConfig config,
-                                  Flux<RuleData> flux,
-                                  ExecutionContext context,
-                                  Scheduler scheduler) {
+            Disposable create(DelayTaskExecutorConfig config,
+                              ExecutionContext context,
+                              Function<RuleData, Mono<Void>> handler,
+                              Scheduler scheduler) {
+                return context
+                    .getInput()
+                    .accept(data -> {
+                        try {
+                            Map<String, Object> map = RuleDataHelper.toContextMap(data);
+                            if (map.get("delay") == null) {
+                                context.getLogger().warn("no delay value from upstream");
+                                return Mono.empty();
+                            }
+                            Duration duration = TimeUtils.parse(String.valueOf(map.get("delay")));
+                            context.getLogger().debug("delay execution {} ", duration);
+                            return Mono
+                                .delay(duration, scheduler)
+                                .then(handler.apply(data))
+                                .thenReturn(true);
+                        } catch (Throwable e) {
+                            context
+                                .getLogger()
+                                .warn("delay execution {} failed", e);
+                            return context
+                                .onError(e, data);
 
-                return flux
-                    .delayUntil(el -> {
-                        Map<String, Object> map = RuleDataHelper.toContextMap(el);
-                        if (map.get("delay") == null) {
-                            return Mono.never();
                         }
-                        Duration duration = TimeUtils.parse(String.valueOf(map.get("delay")));
-                        context.getLogger().debug("delay execution {} ", duration);
-                        return Mono.delay(duration, scheduler);
                     });
             }
 
         },
         delay {//固定延迟
 
-            @Override
-            Flux<RuleData> create(DelayTaskExecutorConfig config,
-                                  Flux<RuleData> flux,
-                                  ExecutionContext context,
-                                  Scheduler scheduler) {
-                return flux
-                    .delayUntil(el -> {
-                        Duration duration = Duration.of(config.getTimeout(), config.getTimeoutUnits());
+            Disposable create(DelayTaskExecutorConfig config,
+                              ExecutionContext context,
+                              Function<RuleData, Mono<Void>> handler,
+                              Scheduler scheduler) {
+                Duration duration = Duration.of(config.getTimeout(), config.getTimeoutUnits());
+                return context
+                    .getInput()
+                    .accept(data -> {
                         context.getLogger().debug("delay execution {} ", duration);
-                        return Mono.delay(duration, scheduler);
+                        return Mono
+                            .delay(duration, scheduler)
+                            .then(handler.apply(data))
+                            .thenReturn(true);
                     });
             }
 
@@ -193,65 +192,41 @@ public class DelayTaskExecutorProvider implements TaskExecutorProvider {
         random {//随机延迟
 
             @Override
-            Flux<RuleData> create(DelayTaskExecutorConfig config,
-                                  Flux<RuleData> flux,
-                                  ExecutionContext context,
-                                  Scheduler scheduler) {
+            Disposable create(DelayTaskExecutorConfig config,
+                              ExecutionContext context,
+                              Function<RuleData, Mono<Void>> handler,
+                              Scheduler scheduler) {
+                return context
+                    .getInput()
+                    .accept(data -> {
+                        try {
+                            Duration duration = Duration.of(
+                                ThreadLocalRandom.current().nextLong(
+                                    config.getRandomFirst(),
+                                    config.getRandomLast()),
+                                config.getRandomUnits());
+                            context.getLogger().debug("delay execution {} ", duration);
+                            return Mono
+                                .delay(duration, scheduler)
+                                .then(handler.apply(data))
+                                .thenReturn(true);
+                        } catch (Throwable e) {
+                            context
+                                .getLogger()
+                                .warn("delay execution {} failed", e);
+                            return context
+                                .onError(e, data);
 
-                return flux
-                    .delayUntil(el -> {
-                        Duration duration = Duration.of(
-                            ThreadLocalRandom.current().nextLong(
-                                config.getRandomFirst(),
-                                config.getRandomLast()),
-                            config.getRandomUnits());
-                        context.getLogger().debug("delay execution {} ", duration);
-                        return Mono.delay(duration, scheduler);
+                        }
                     });
             }
-        },
-        rate {//速率限制
+        }
+        ;
 
-            @Override
-            Flux<RuleData> create(DelayTaskExecutorConfig config,
-                                  Flux<RuleData> flux,
-                                  ExecutionContext context,
-                                  Scheduler scheduler) {
-
-                Duration duration = Duration.of(config.nbRateUnits, config.getRateUnits());
-                return flux
-                    .window(duration, scheduler)
-                    .flatMap(window -> {
-                        AtomicLong counter = new AtomicLong();
-                        Flux<RuleData> stream;
-                        if (config.isErrorOnDrop()) {//丢弃时触发错误
-                            stream = window
-                                .index()
-                                .flatMap(tp2 -> {
-                                    if (tp2.getT1() < config.getRate()) {
-                                        return Mono.just(tp2.getT2());
-                                    }
-                                    return context.fireEvent(RuleConstants.Event.error, context.newRuleData(tp2.getT2()));
-                                });
-                        } else {
-                            stream = window.take(config.getRate());
-                        }
-                        return stream
-                            .doOnNext(v -> counter.incrementAndGet())
-                            .doOnComplete(() -> {
-                                if (counter.get() > 0) {
-                                    context.getLogger().debug("rate limit execution {}/{}", counter, duration);
-                                }
-                            })
-                            ;
-                    }, Integer.MAX_VALUE);
-            }
-        };
-
-        abstract Flux<RuleData> create(DelayTaskExecutorConfig config,
-                                       Flux<RuleData> flux,
-                                       ExecutionContext context,
-                                       Scheduler scheduler);
+        abstract Disposable create(DelayTaskExecutorConfig config,
+                                   ExecutionContext context,
+                                   Function<RuleData, Mono<Void>> handler,
+                                   Scheduler scheduler);
 
     }
 }

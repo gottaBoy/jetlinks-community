@@ -21,6 +21,7 @@ import io.netty.buffer.UnpooledHeapByteBuf;
 import io.netty.util.ReferenceCountUtil;
 import io.vertx.core.MultiMap;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.buffer.impl.BufferImpl;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
@@ -29,6 +30,7 @@ import lombok.Generated;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.hswebframework.web.exception.BusinessException;
 import org.jetlinks.core.message.codec.http.Header;
 import org.jetlinks.core.message.codec.http.HttpRequestMessage;
 import org.jetlinks.core.message.codec.http.HttpResponseMessage;
@@ -44,6 +46,7 @@ import org.springframework.util.StringUtils;
 import reactor.core.publisher.Mono;
 
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Function;
@@ -77,6 +80,8 @@ public class VertxHttpExchange implements HttpExchange, HttpResponse, HttpReques
 
     private volatile Boolean alreadyResponse = false;
 
+    private int handleCount;
+
     public VertxHttpExchange(HttpServerRequest httpServerRequest,
                              HttpServerConfig config) {
 
@@ -88,10 +93,9 @@ public class VertxHttpExchange implements HttpExchange, HttpResponse, HttpReques
         if (httpServerRequest.method() == HttpMethod.GET) {
             body = Mono.just(Unpooled.EMPTY_BUFFER);
         } else {
-
             Mono<ByteBuf> buffer = Mono
                 .fromCompletionStage(this.httpServerRequest.body().toCompletionStage())
-                .map(Buffer::getByteBuf);
+                .map(buf->((BufferImpl) buf).getByteBuf());
 
             if (MultiPart.isMultiPart(getContentType())) {
                 body = MultiPart
@@ -100,11 +104,21 @@ public class VertxHttpExchange implements HttpExchange, HttpResponse, HttpReques
                     .thenReturn(Unpooled.EMPTY_BUFFER)
                     .cache();
             } else {
-                body = buffer;
+                body = buffer.cache();
             }
 
         }
     }
+
+
+    void mark() {
+        handleCount++;
+    }
+
+    int handleCount() {
+        return handleCount;
+    }
+
 
     @Override
     @Generated

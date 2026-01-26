@@ -31,8 +31,9 @@ public class ShortenedThrowableConverter extends ThrowableHandlingConverter {
     public static void writeStackTraceElement(StringBuilder builder,
                                               StackTraceElementProxy[] elements) {
         int unimportantCount = 0;
+        int count = 0;
         for (StackTraceElementProxy element : elements) {
-            if (ExceptionUtils.compactEnabled && ExceptionUtils.isUnimportant(element.getStackTraceElement())) {
+            if (ExceptionUtils.compactEnabled && count++>2 && ExceptionUtils.isUnimportant(element.getStackTraceElement())) {
                 unimportantCount++;
                 continue;
             }

@@ -16,6 +16,13 @@ public class TimeseriesExceptionAnalyzerReporter extends ExceptionAnalyzerReport
     }
 
     void init() {
+
+        addReporter(
+            err -> err.toString().contains("create_hypertable") &&
+                err.toString().contains("does not exist"),
+            err ->
+                log.warn(wrapLog("请使用TimescaleDB.或者Postgres安装并启用TimescaleDB插件."), err));
+
         addReporter(
             err -> err instanceof NoSuchBeanDefinitionException &&
                 Objects.equals(((NoSuchBeanDefinitionException) err).getBeanType(),

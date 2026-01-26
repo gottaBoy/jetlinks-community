@@ -44,14 +44,9 @@ public class TcpMessage implements EncodedMessage {
 
     @Override
     public String toString() {
-        StringBuilder builder = new StringBuilder();
-
-        if (ByteBufUtil.isText(payload, StandardCharsets.UTF_8)) {
-            builder.append(payloadAsString());
-        } else {
-            ByteBufUtil.appendPrettyHexDump(builder, payload);
+        if (payload == null || !payload.isReadable()) {
+            return "<released>";
         }
-
-        return builder.toString();
+        return ByteBufUtil.prettyHexDump(payload);
     }
 }
