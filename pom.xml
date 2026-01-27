@@ -25,7 +25,7 @@
         <!--  基础通用模块依赖,快照版本表示正在持续迭代.发布后将同步到maven中央仓库 -->
 
         <!-- https://github.com/hs-web/hsweb-framework -->
-        <hsweb.framework.version>5.0.1</hsweb.framework.version>
+        <hsweb.framework.version>5.0.1.1-SNAPSHOT</hsweb.framework.version>
         <!-- https://github.com/hs-web/hsweb-easy-orm -->
         <easyorm.version>4.2.1</easyorm.version>
         <!-- https://github.com/jetlinks/jetlinks -->
@@ -739,6 +739,12 @@
                 <groupId>org.jetlinks</groupId>
                 <artifactId>jetlinks-supports</artifactId>
                 <version>${jetlinks.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.hswebframework.web</groupId>
+                <artifactId>hsweb-logging</artifactId>
+                <version>${hsweb.framework.version}</version>
             </dependency>
 
             <dependency>

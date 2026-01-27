@@ -118,16 +118,19 @@ public class DefaultMenuService
             .zip(
                 this
                     .getGrantedMenus(targetType, targetId)
-                    .collectMap(GenericEntity::getId),
-                allMenu.collectMap(MenuView::getId, Function.identity(), LinkedHashMap::new),
-                (granted, all) -> LocaleUtils
+                    .collectMap(MenuView::getId, Function.identity(), LinkedHashMap::new),
+                allMenu.collectMap(MenuView::getId, Function.identity(), LinkedHashMap::new)
+            )
+            .flatMapMany(tuple -> {
+                Map<String, MenuView> granted = tuple.getT1();
+                return LocaleUtils
                     .currentReactive()
                     .flatMapMany(locale -> allMenu
                         .doOnNext(MenuView::resetGrant)
                         .map(view -> view
                             .withGranted(granted.get(view.getId()))
-                        )))
-            .flatMapMany(Function.identity());
+                        ));
+            });
     }
 
     public Flux<MenuView> getMenuViews(QueryParamEntity queryParam, Predicate<MenuEntity> menuPredicate) {
