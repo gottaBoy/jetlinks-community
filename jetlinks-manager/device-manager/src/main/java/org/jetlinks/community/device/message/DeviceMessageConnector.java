@@ -245,12 +245,19 @@ public class DeviceMessageConnector implements DecodedClientMessageHandler {
                             boolean ignoreLogBefore = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
                             boolean ignoreStorageBefore = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreStorage);
                             
-                            // 记录 EVENT、FUNCTION 消息在添加配置前的状态
+                            // 记录 EVENT、FUNCTION 消息在添加配置前的状态（remotejoystick 高频用 DEBUG）
+                            boolean isRemoteJoystick = deviceMessage instanceof org.jetlinks.core.message.function.FunctionInvokeMessage
+                                && "remotejoystick".equals(((org.jetlinks.core.message.function.FunctionInvokeMessage) deviceMessage).getFunctionId());
                             if (deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT ||
                                 deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION ||
                                 deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION_REPLY) {
-                                log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置前: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
-                                    deviceId, deviceMessage.getMessageType(), ignoreLogBefore, ignoreStorageBefore);
+                                if (isRemoteJoystick) {
+                                    log.debug("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置前: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                        deviceId, deviceMessage.getMessageType(), ignoreLogBefore, ignoreStorageBefore);
+                                } else {
+                                    log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置前: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                        deviceId, deviceMessage.getMessageType(), ignoreLogBefore, ignoreStorageBefore);
+                                }
                             }
                             
                             // 添加设备配置到 header（可能会覆盖某些 header）
@@ -280,14 +287,19 @@ public class DeviceMessageConnector implements DecodedClientMessageHandler {
                                 deviceMessage.addHeader(org.jetlinks.core.message.Headers.ignoreStorage, ignoreStorageBefore);
                             }
                             
-                            // 记录 EVENT、FUNCTION 消息在添加配置后的状态
+                            // 记录 EVENT、FUNCTION 消息在添加配置后的状态（remotejoystick 高频用 DEBUG）
                             if (deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.EVENT ||
                                 deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION ||
                                 deviceMessage.getMessageType() == org.jetlinks.core.message.MessageType.INVOKE_FUNCTION_REPLY) {
                                 boolean finalIgnoreLog = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreLog);
                                 boolean finalIgnoreStorage = deviceMessage.getHeaderOrDefault(org.jetlinks.core.message.Headers.ignoreStorage);
-                                log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置后: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
-                                    deviceId, deviceMessage.getMessageType(), finalIgnoreLog, finalIgnoreStorage);
+                                if (isRemoteJoystick) {
+                                    log.debug("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置后: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                        deviceId, deviceMessage.getMessageType(), finalIgnoreLog, finalIgnoreStorage);
+                                } else {
+                                    log.info("DeviceMessageConnector.createDeviceMessageTopic 消息添加配置后: deviceId={}, messageType={}, ignoreLog={}, ignoreStorage={}", 
+                                        deviceId, deviceMessage.getMessageType(), finalIgnoreLog, finalIgnoreStorage);
+                                }
                             }
                             
                             String productId = deviceMessage.getHeader(PropertyConstants.productId).orElse("null");

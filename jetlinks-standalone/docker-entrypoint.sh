@@ -19,5 +19,7 @@ java.scripting/javax.script=ALL-UNNAMED \
 --add-opens \
 java.base/java.time=ALL-UNNAMED \
 -Dreactor.schedulers.defaultBoundedElasticOnVirtualThreads=true \
+-Dreactor.schedulers.defaultBoundedElasticSize=200 \
+-Dreactor.schedulers.defaultBoundedElasticQueuedTaskCap=200000 \
 -Djava.security.egd=file:/dev/./urandom \
 org.springframework.boot.loader.launch.PropertiesLauncher

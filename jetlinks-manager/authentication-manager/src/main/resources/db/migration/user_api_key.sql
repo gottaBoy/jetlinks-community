@@ -1,0 +1,43 @@
+-- -- =============================================
+-- -- 用户 API Key 表建表语句
+-- -- =============================================
+--
+-- -- PostgreSQL 版本
+-- -- =============================================
+-- CREATE TABLE IF NOT EXISTS user_api_key
+-- (
+--     id          BIGSERIAL PRIMARY KEY,
+--     user_id     VARCHAR(64)  NOT NULL,
+--     app         VARCHAR(255),
+--     api_key     VARCHAR(500) NOT NULL,
+--     expired_at  BIGINT,
+--     remark      VARCHAR(255),
+--     enable      SMALLINT     NOT NULL DEFAULT 1,
+--     create_time BIGINT       NOT NULL,
+--     modify_time BIGINT,
+--     creator_id  VARCHAR(64),
+--     creator_name VARCHAR(255),
+--     modifier_id VARCHAR(64),
+--     modifier_name VARCHAR(255),
+--     CONSTRAINT uk_user_api_key_id UNIQUE (id)
+-- );
+--
+-- -- 创建索引
+-- CREATE INDEX IF NOT EXISTS idx_uak_user_id ON user_api_key (user_id);
+-- CREATE INDEX IF NOT EXISTS idx_uak_api_key ON user_api_key (api_key);
+--
+-- -- 添加表注释
+-- COMMENT ON TABLE user_api_key IS '用户API Key表';
+-- COMMENT ON COLUMN user_api_key.id IS '主键ID';
+-- COMMENT ON COLUMN user_api_key.user_id IS '用户ID';
+-- COMMENT ON COLUMN user_api_key.app IS '应用名称';
+-- COMMENT ON COLUMN user_api_key.api_key IS 'API Key';
+-- COMMENT ON COLUMN user_api_key.expired_at IS '过期时间（时间戳，毫秒），null表示永不过期';
+-- COMMENT ON COLUMN user_api_key.remark IS '备注';
+-- COMMENT ON COLUMN user_api_key.enable IS '是否启用，1为启用，0为禁用';
+-- COMMENT ON COLUMN user_api_key.create_time IS '创建时间（时间戳，毫秒）';
+-- COMMENT ON COLUMN user_api_key.modify_time IS '修改时间（时间戳，毫秒）';
+-- COMMENT ON COLUMN user_api_key.creator_id IS '创建人ID';
+-- COMMENT ON COLUMN user_api_key.creator_name IS '创建人名称';
+-- COMMENT ON COLUMN user_api_key.modifier_id IS '修改人ID';
+-- COMMENT ON COLUMN user_api_key.modifier_name IS '修改人名称';

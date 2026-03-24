@@ -1,0 +1,28 @@
+-- -- =============================================
+-- -- 用户 API Key 表建表语句 (MySQL 版本)
+-- -- =============================================
+--
+-- CREATE TABLE IF NOT EXISTS user_api_key
+-- (
+--     id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     user_id     VARCHAR(64)  NOT NULL COMMENT '用户ID',
+--     app         VARCHAR(255) COMMENT '应用名称',
+--     api_key     VARCHAR(500) NOT NULL COMMENT 'API Key',
+--     expired_at  BIGINT COMMENT '过期时间（时间戳，毫秒），null表示永不过期',
+--     remark      VARCHAR(255) COMMENT '备注',
+--     enable      TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用',
+--     create_time BIGINT       NOT NULL COMMENT '创建时间（时间戳，毫秒）',
+--     modify_time BIGINT COMMENT '修改时间（时间戳，毫秒）',
+--     creator_id  VARCHAR(64) COMMENT '创建人ID',
+--     creator_name VARCHAR(255) COMMENT '创建人名称',
+--     modifier_id VARCHAR(64) COMMENT '修改人ID',
+--     modifier_name VARCHAR(255) COMMENT '修改人名称',
+--     CONSTRAINT uk_user_api_key_id UNIQUE (id)
+-- ) ENGINE = InnoDB
+--   DEFAULT CHARSET = utf8mb4
+--   COLLATE = utf8mb4_unicode_ci
+--   COMMENT = '用户API Key表';
+--
+-- -- 创建索引
+-- CREATE INDEX idx_uak_user_id ON user_api_key (user_id);
+-- CREATE INDEX idx_uak_api_key ON user_api_key (api_key);
