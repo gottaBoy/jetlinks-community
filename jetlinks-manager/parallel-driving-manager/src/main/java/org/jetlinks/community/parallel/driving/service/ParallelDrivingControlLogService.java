@@ -1,159 +1,173 @@
 package org.jetlinks.community.parallel.driving.service;
 
-import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hswebframework.ezorm.rdb.mapping.ReactiveRepository;
+import org.hswebframework.web.api.crud.entity.PagerResult;
+import org.hswebframework.web.api.crud.entity.QueryParamEntity;
+import org.jetlinks.community.parallel.driving.entity.ParallelDrivingControlLog;
 import org.jetlinks.community.parallel.driving.message.ParallelDrivingControlMessage;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
-/**
- * 平行驾驶控制日志服务
- * 记录控制指令的发送日志和统计信息
- *
- * @author JetLinks
- */
 @Service
 @Slf4j
-@AllArgsConstructor
 public class ParallelDrivingControlLogService {
-    
-    // 控制日志缓存（可以后续改为持久化存储）
-    private final ConcurrentLinkedQueue<ControlLog> controlLogs = new ConcurrentLinkedQueue<>();
-    
-    // 统计信息
-    private final Map<String, ControlStatistics> statistics = new java.util.concurrent.ConcurrentHashMap<>();
-    
-    /**
-     * 记录控制指令日志
-     *
-     * @param cockpitDeviceId 驾驶舱设备ID
-     * @param vehicleDeviceId 车辆设备ID
-     * @param controlMessage 控制指令消息
-     * @param success 是否成功
-     * @param errorMessage 错误信息（如果失败）
-     */
-    public void logControlCommand(String cockpitDeviceId, 
+
+    private final Sinks.Many<ParallelDrivingControlLog> logSink =
+        Sinks.many().multicast().onBackpressureBuffer(10000);
+    private Disposable batchSubscription;
+
+    private final ReactiveRepository<ParallelDrivingControlLog, String> logRepository;
+    private final Map<String, ControlStatistics> statistics = new ConcurrentHashMap<>();
+
+    @Autowired
+    public ParallelDrivingControlLogService(
+            ReactiveRepository<ParallelDrivingControlLog, String> logRepository) {
+        this.logRepository = logRepository;
+    }
+
+    @PostConstruct
+    public void init() {
+        batchSubscription = logSink.asFlux()
+            .bufferTimeout(100, Duration.ofSeconds(5))
+            .filter(batch -> !batch.isEmpty())
+            .concatMap(this::persistBatch)
+            .subscribe(
+                count -> {},
+                error -> log.error("Control log batch processing failed", error)
+            );
+        log.info("ControlLogService initialized with async batch persistence (bufferTimeout 100/5s)");
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        logSink.tryEmitComplete();
+        if (batchSubscription != null) {
+            batchSubscription.dispose();
+        }
+    }
+
+    public void logControlCommand(String cockpitDeviceId,
                                  String vehicleDeviceId,
                                  ParallelDrivingControlMessage controlMessage,
                                  boolean success,
                                  String errorMessage) {
-        ControlLog controlLog = ControlLog.builder()
-            .id(java.util.UUID.randomUUID().toString())
-            .cockpitDeviceId(cockpitDeviceId)
-            .vehicleDeviceId(vehicleDeviceId)
-            .controlType(controlMessage.getControlType() != null 
-                ? controlMessage.getControlType().getValue() 
-                : "unknown")
-            .controlParams(controlMessage.getControlParams())
-            .success(success)
-            .errorMessage(errorMessage)
-            .timestamp(System.currentTimeMillis())
-            .build();
-        
-        controlLogs.offer(controlLog);
-        
-        // 保持最近 1000 条日志
-        while (controlLogs.size() > 1000) {
-            controlLogs.poll();
+        ParallelDrivingControlLog controlLog = new ParallelDrivingControlLog();
+        controlLog.setCockpitDeviceId(cockpitDeviceId);
+        controlLog.setVehicleDeviceId(vehicleDeviceId);
+        controlLog.setControlType(controlMessage.getControlType() != null
+            ? controlMessage.getControlType().getValue()
+            : "unknown");
+        controlLog.setControlParams(controlMessage.getControlParams());
+        controlLog.setSuccess(success);
+        controlLog.setErrorMessage(errorMessage);
+        controlLog.setTimestamp(System.currentTimeMillis());
+
+        Sinks.EmitResult result = logSink.tryEmitNext(controlLog);
+        if (result.isFailure()) {
+            log.warn("Failed to emit control log: {}", result);
         }
-        
-        // 更新统计信息
+
         String key = cockpitDeviceId + "-" + vehicleDeviceId;
         statistics.computeIfAbsent(key, k -> new ControlStatistics())
-            .increment(controlMessage.getControlType() != null 
-                ? controlMessage.getControlType().getValue() 
-                : "unknown", success);
-        
+            .increment(controlLog.getControlType(), success);
+
         if (success) {
-            log.info("控制指令发送成功: cockpit={}, vehicle={}, type={}, params={}", 
-                cockpitDeviceId, vehicleDeviceId, controlLog.getControlType(), controlLog.getControlParams());
+            log.info("控制指令发送成功: cockpit={}, vehicle={}, type={}",
+                cockpitDeviceId, vehicleDeviceId, controlLog.getControlType());
         } else {
-            log.warn("控制指令发送失败: cockpit={}, vehicle={}, type={}, error={}", 
+            log.warn("控制指令发送失败: cockpit={}, vehicle={}, type={}, error={}",
                 cockpitDeviceId, vehicleDeviceId, controlLog.getControlType(), errorMessage);
         }
     }
-    
-    /**
-     * 获取控制日志
-     *
-     * @param cockpitDeviceId 驾驶舱设备ID（可选）
-     * @param vehicleDeviceId 车辆设备ID（可选）
-     * @param limit 限制数量
-     * @return 控制日志列表
-     */
-    public java.util.List<ControlLog> getControlLogs(String cockpitDeviceId, 
-                                                     String vehicleDeviceId, 
-                                                     int limit) {
-        return controlLogs.stream()
-            .filter(log -> {
-                if (cockpitDeviceId != null && !log.getCockpitDeviceId().equals(cockpitDeviceId)) {
-                    return false;
-                }
-                if (vehicleDeviceId != null && !log.getVehicleDeviceId().equals(vehicleDeviceId)) {
-                    return false;
-                }
-                return true;
-            })
-            .sorted((a, b) -> Long.compare(b.getTimestamp(), a.getTimestamp()))
-            .limit(limit)
-            .collect(java.util.stream.Collectors.toList());
+
+    private Mono<Integer> persistBatch(List<ParallelDrivingControlLog> batch) {
+        log.debug("Persisting control log batch: size={}", batch.size());
+        return Flux.fromIterable(batch)
+            .as(logRepository::insert)
+            .doOnSuccess(count -> log.debug("Persisted {} control logs", count))
+            .onErrorResume(err -> {
+                log.error("Failed to persist control log batch (size={}): {}",
+                    batch.size(), err.getMessage());
+                return Mono.just(0);
+            });
     }
-    
-    /**
-     * 获取统计信息
-     *
-     * @param cockpitDeviceId 驾驶舱设备ID（可选）
-     * @param vehicleDeviceId 车辆设备ID（可选）
-     * @return 统计信息
-     */
+
+    public Mono<PagerResult<ParallelDrivingControlLog>> getControlLogs(QueryParamEntity query) {
+        return logRepository.createQuery()
+            .setParam(query)
+            .count()
+            .flatMap(total -> {
+                if (total == 0) {
+                    return Mono.just(PagerResult.empty());
+                }
+                return logRepository.createQuery()
+                    .setParam(query)
+                    .fetch()
+                    .collectList()
+                    .map(list -> PagerResult.of(total, list, query));
+            });
+    }
+
+    public Mono<List<ParallelDrivingControlLog>> getControlLogs(String cockpitDeviceId,
+                                                                 String vehicleDeviceId,
+                                                                 int limit) {
+        QueryParamEntity query = new QueryParamEntity();
+        query.setPageSize(limit);
+        query.setPaging(false);
+        if (cockpitDeviceId != null) {
+            query.and("cockpitDeviceId", "eq", cockpitDeviceId);
+        }
+        if (vehicleDeviceId != null) {
+            query.and("vehicleDeviceId", "eq", vehicleDeviceId);
+        }
+        query.orderBy("timestamp").desc();
+        return logRepository.createQuery()
+            .setParam(query)
+            .fetch()
+            .take(limit)
+            .collectList();
+    }
+
     public ControlStatistics getStatistics(String cockpitDeviceId, String vehicleDeviceId) {
         String key = cockpitDeviceId + "-" + vehicleDeviceId;
         return statistics.getOrDefault(key, new ControlStatistics());
     }
-    
-    /**
-     * 控制日志实体
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class ControlLog {
-        private String id;
-        private String cockpitDeviceId;
-        private String vehicleDeviceId;
-        private String controlType;
-        private Map<String, Object> controlParams;
-        private boolean success;
-        private String errorMessage;
-        private long timestamp;
-    }
-    
-    /**
-     * 控制统计信息
-     */
+
     @lombok.Data
     public static class ControlStatistics {
         private final Map<String, Long> successCount = new HashMap<>();
         private final Map<String, Long> failureCount = new HashMap<>();
         private long totalSuccess = 0;
         private long totalFailure = 0;
-        
+
         public void increment(String controlType, boolean success) {
             if (success) {
-                successCount.merge(controlType, 1L, (a, b) -> a + b);
+                successCount.merge(controlType, 1L, Long::sum);
                 totalSuccess++;
             } else {
-                failureCount.merge(controlType, 1L, (a, b) -> a + b);
+                failureCount.merge(controlType, 1L, Long::sum);
                 totalFailure++;
             }
         }
-        
+
         public long getTotal() {
             return totalSuccess + totalFailure;
         }
-        
+
         public double getSuccessRate() {
             long total = getTotal();
             return total > 0 ? (double) totalSuccess / total : 0.0;

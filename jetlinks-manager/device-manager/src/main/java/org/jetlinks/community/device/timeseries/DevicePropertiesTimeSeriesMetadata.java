@@ -15,16 +15,20 @@
  */
 package org.jetlinks.community.device.timeseries;
 
+import org.jetlinks.community.ConfigMetadataConstants;
+import org.jetlinks.community.timeseries.TimeSeriesMetadata;
+import org.jetlinks.community.timeseries.TimeSeriesMetric;
 import org.jetlinks.core.metadata.PropertyMetadata;
 import org.jetlinks.core.metadata.SimplePropertyMetadata;
 import org.jetlinks.core.metadata.types.*;
-import org.jetlinks.community.timeseries.TimeSeriesMetadata;
-import org.jetlinks.community.timeseries.TimeSeriesMetric;
 
 import java.util.ArrayList;
 import java.util.List;
 
 class DevicePropertiesTimeSeriesMetadata implements TimeSeriesMetadata {
+
+    /** 设备属性 JSON 等原始串可能超过默认 varchar(255)，仅放宽 value / formatValue */
+    private static final long PROPERTY_VALUE_VARCHAR_LENGTH = 2048L;
 
     private final static List<PropertyMetadata> metadata = new ArrayList<>();
 
@@ -59,7 +63,8 @@ class DevicePropertiesTimeSeriesMetadata implements TimeSeriesMetadata {
         {
             SimplePropertyMetadata property = new SimplePropertyMetadata();
             property.setId("value");
-            property.setValueType(new StringType());
+            property.setValueType(new StringType().expand(
+                ConfigMetadataConstants.maxLength, PROPERTY_VALUE_VARCHAR_LENGTH));
             property.setName("原始值");
             metadata.add(property);
         }
@@ -90,7 +95,8 @@ class DevicePropertiesTimeSeriesMetadata implements TimeSeriesMetadata {
         {
             SimplePropertyMetadata property = new SimplePropertyMetadata();
             property.setId("formatValue");
-            property.setValueType(new StringType());
+            property.setValueType(new StringType().expand(
+                ConfigMetadataConstants.maxLength, PROPERTY_VALUE_VARCHAR_LENGTH));
             property.setName("格式化的值");
             metadata.add(property);
         }

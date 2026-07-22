@@ -19,6 +19,7 @@
         <module>logging-manager</module>
         <module>rule-engine-manager</module>
         <module>parallel-driving-manager</module>
+        <module>zota-integration</module>
     </modules>
 
 </project>

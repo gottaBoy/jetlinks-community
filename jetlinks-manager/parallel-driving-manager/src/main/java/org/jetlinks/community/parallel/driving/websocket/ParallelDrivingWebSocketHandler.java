@@ -129,8 +129,7 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
                 .builder()
                 .subscriberId("parallel-driving-websocket-" + sessionId)
                 .topics("/device/*/" + vehicleId + "/message/property/report")
-                .broker()
-                .local()
+                .features(Subscription.Feature.local, Subscription.Feature.broker)
                 .build();
             
             return eventBus.subscribe(subscription, DeviceMessage.class)
@@ -167,8 +166,7 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
                         .builder()
                         .subscriberId("parallel-driving-websocket-" + sessionId)
                         .topics("/device/*/" + boundVehicleId + "/message/property/report")
-                        .broker()
-                        .local()
+                        .features(Subscription.Feature.local, Subscription.Feature.broker)
                         .build();
                     
                     return eventBus.subscribe(subscription, DeviceMessage.class)

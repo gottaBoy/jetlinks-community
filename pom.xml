@@ -41,7 +41,6 @@
         <jetlinks.sdk.version>1.1.0</jetlinks.sdk.version>
         <!-- https://github.com/hsweb/hsweb-utils -->
         <hsweb.utils.version>3.0.5</hsweb.utils.version>
-
         <!-- 第三方依赖版本 -->
         <r2dbc.version>Borca-SR2</r2dbc.version>
         <hsweb.expands.version>3.0.2</hsweb.expands.version>

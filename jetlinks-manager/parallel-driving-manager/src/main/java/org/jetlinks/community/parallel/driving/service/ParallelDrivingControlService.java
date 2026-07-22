@@ -8,9 +8,13 @@ import org.jetlinks.community.parallel.driving.entity.ParallelDrivingSession;
 import org.jetlinks.community.parallel.driving.message.ParallelDrivingControlMessage;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoom;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager;
+import org.jetlinks.core.message.Headers;
 import org.jetlinks.core.device.DeviceRegistry;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.time.Duration;
 
 /**
  * 平行驾驶控制服务
@@ -52,7 +56,7 @@ public class ParallelDrivingControlService {
         )
         // 2. 验证会话状态并获取房间
         .then(Mono.zip(
-            relationService.getSession(cockpitDeviceId, vehicleDeviceId)
+            waitActiveSession(cockpitDeviceId, vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new BusinessException("会话不存在或未激活"))),
             roomManager.getRoom(cockpitDeviceId, vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new BusinessException("房间不存在或未激活")))
@@ -78,7 +82,15 @@ public class ParallelDrivingControlService {
             if (vehicleDeviceId != null) {
                 controlMessage.addHeader("targetDeviceId", vehicleDeviceId);
             }
-            
+
+            // Parallel-driving control is a protocol-bridged command. Force bypasses
+            // platform function metadata validation on the target device model.
+            controlMessage.addHeaderIfAbsent(Headers.force, true);
+
+            // 5b. Translate controlType + controlParams → flat C++ field names in inputs.
+            //     Must be called after setDeviceId so the message is fully initialized.
+            controlMessage.prepareInputs();
+
             // 6. 通过房间转发消息（自动处理加密）
             return room.forwardCockpitToVehicle(controlMessage);
         })
@@ -144,5 +156,22 @@ public class ParallelDrivingControlService {
     public Mono<Void> setSpeed(String cockpitDeviceId, String vehicleDeviceId, double speed) {
         return sendControlCommand(cockpitDeviceId, vehicleDeviceId, 
             ParallelDrivingControlMessage.setSpeed(speed));
+    }
+
+    /**
+     * takeover 刚成功后会话可能短暂处于 binding，给一个很短的等待窗口再判定，减少瞬时 500。
+     */
+    private Mono<ParallelDrivingSession> waitActiveSession(String cockpitDeviceId, String vehicleDeviceId) {
+        return Flux
+            .interval(Duration.ZERO, Duration.ofMillis(200))
+            .take(12)
+            .concatMap(i -> relationService.getSession(cockpitDeviceId, vehicleDeviceId))
+            .filter(session -> session != null && session.isActive())
+            .next()
+            .switchIfEmpty(
+                relationService.getSession(cockpitDeviceId, vehicleDeviceId)
+                    .flatMap(session -> Mono.<ParallelDrivingSession>error(new BusinessException("会话未激活，当前状态: " + session.getState())))
+                    .switchIfEmpty(Mono.<ParallelDrivingSession>error(new BusinessException("会话不存在或未激活")))
+            );
     }
 }

@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.concurrent.TimeUnit;
 
@@ -17,6 +18,9 @@ import java.util.concurrent.TimeUnit;
 public class ParallelDrivingLatencyMetrics {
 
     public static final String METRIC_PLATFORM_LATENCY = "parallel_driving.remotejoystick.platform_latency";
+
+    /** 车端功能回复因白名单未转发驾驶舱（按 functionId 打点） */
+    public static final String METRIC_VEHICLE_REPLY_COCKPIT_SKIPPED = "parallel_driving.vehicle_reply.cockpit_forward_skipped";
 
     private final MeterRegistry registry;
 
@@ -42,5 +46,20 @@ public class ParallelDrivingLatencyMetrics {
             .description("remotejoystick 平台处理延迟：收到驾驶舱消息到 publish 到设备网关")
             .register(registry)
             .record(durationMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 记录被白名单拦截、未转发至驾驶舱的车端功能回复（便于观测优化效果）。
+     *
+     * @param functionId 车端回复中的 functionId，未知时为 {@code unknown}
+     */
+    public void recordVehicleReplyCockpitForwardSkipped(String functionId) {
+        if (registry == null) {
+            return;
+        }
+        String fn = StringUtils.hasText(functionId) ? functionId : "unknown";
+        registry.counter(METRIC_VEHICLE_REPLY_COCKPIT_SKIPPED,
+                "function", fn)
+            .increment();
     }
 }

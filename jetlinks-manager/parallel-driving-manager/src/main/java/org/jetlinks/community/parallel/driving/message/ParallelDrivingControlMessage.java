@@ -28,7 +28,23 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
         EMERGENCY_STOP("emergencyStop", "紧急停车"),
         SET_SPEED("setSpeed", "设置速度"),
         TURN_LEFT("turnLeft", "左转"),
-        TURN_RIGHT("turnRight", "右转");
+        TURN_RIGHT("turnRight", "右转"),
+        /** 手刹：controlParams.on 0/1 */
+        EPB("epb", "手刹"),
+        /** 喇叭：controlParams.on 0/1 */
+        HORN("horn", "喇叭"),
+        /** 近光：controlParams.on 0/1 */
+        LOW_BEAM("lowBeam", "近光灯"),
+        /** 远光：controlParams.on 0/1 */
+        HIGH_BEAM("highBeam", "远光灯"),
+        /** 双闪：controlParams.on 0/1 */
+        HAZARD_LIGHT("hazardLight", "双闪灯"),
+        /** 辅助灯：controlParams.on 0/1 */
+        AUX_LIGHT("auxLight", "辅助灯"),
+        /** 驾驶模式：controlParams.mode 0=M手动 1=A智驾 2=R远控(平行) — 与车端 parallelDrivingControl + e2e driving_mode 一致 */
+        DRIVE_MODE("driveMode", "驾驶模式"),
+        /** MRC 紧急停车：controlParams.mrc_status 0=正常 1=MRC0 2=MRC1 3=MRC2（M/A/R 任意模式可触发） */
+        MRC("mrc", "MRC紧急停车");
         
         private final String value;
         private final String text;
@@ -127,22 +143,101 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
     }
     
     /**
-     * 转换为 FunctionInvokeMessage 的 inputs
-     * 用于兼容 JetLinks 标准消息格式
+     * Translate controlType + controlParams into the flat C++ field names and populate
+     * this FunctionInvokeMessage's inputs list.
+     *
+     * Canonical wire format (functionId = "parallelDrivingControl"):
+     *   drive_mode    : 0/1/2
+     *   hbh_li_cmd    : 0=off, 1=on
+     *   lbh_li_cmd    : 0=off, 1=on
+     *   horn_cmd      : 0=off, 1=honk  (one-shot: cloud clears cache after each publish)
+     *   hazard_li_cmd : 0=off, 1=on
+     *   epb_cmd       : 0=释放, 1=拉起
+     *   aux_li_cmd    : 0=off, 1=on
+     *
+     * Call this method once before forwarding the message to the vehicle.
+     */
+    public void prepareInputs() {
+        if (controlType == null) return;
+
+        switch (controlType) {
+            case DRIVE_MODE: {
+                addInput("controlType", "drive_mode");
+                Object mode = controlParams.get("mode");
+                if (mode != null) addInput("drive_mode", mode);
+                break;
+            }
+            case HIGH_BEAM: {
+                addInput("controlType", "hbh_light");
+                Object on = controlParams.get("on");
+                if (on != null) addInput("hbh_li_cmd", toInt(on));  // 0=off, 1=on
+                break;
+            }
+            case LOW_BEAM: {
+                addInput("controlType", "lbh_light");
+                Object on = controlParams.get("on");
+                if (on != null) addInput("lbh_li_cmd", toInt(on));  // 0=off, 1=on
+                break;
+            }
+            case HORN: {
+                addInput("controlType", "horn");
+                Object on = controlParams.get("on");
+                // horn is one-shot: 1=honk, 0=off
+                if (on != null) addInput("horn_cmd", toInt(on) == 1 ? 1 : 0);
+                break;
+            }
+            case HAZARD_LIGHT: {
+                addInput("controlType", "hazard_light");
+                Object on = controlParams.get("on");
+                if (on != null) addInput("hazard_li_cmd", toInt(on));  // 0=off, 1=on
+                break;
+            }
+            case EPB: {
+                addInput("controlType", "epb");
+                Object on = controlParams.get("on");
+                if (on != null) addInput("epb_cmd", toInt(on));  // 0=释放, 1=拉起
+                break;
+            }
+            case AUX_LIGHT: {
+                addInput("controlType", "aux_light");
+                Object on = controlParams.get("on");
+                if (on != null) addInput("aux_li_cmd", toInt(on));  // 0=off, 1=on
+                break;
+            }
+            case MRC: {
+                addInput("controlType", "mrc");
+                Object status = controlParams.get("mrc_status");
+                if (status != null) addInput("mrc_status", toInt(status));
+                break;
+            }
+            default:
+                // Other control types (STEERING, BRAKE, etc.) keep existing controlParams as-is
+                controlParams.forEach(this::addInput);
+                break;
+        }
+    }
+
+    /** Convert on/off integer (1=on, 0=off) to cmd encoding (1=on, 2=off, 0=no-op). */
+    private static int onToCmd(Object on) {
+        int v = toInt(on);
+        return v == 1 ? 1 : 2;
+    }
+
+    private static int toInt(Object v) {
+        if (v instanceof Number) return ((Number) v).intValue();
+        try { return Integer.parseInt(String.valueOf(v)); } catch (Exception e) { return 0; }
+    }
+
+    /**
+     * @deprecated Use prepareInputs() instead. This override was incorrect — it re-added
+     * all controlParams on every addInput() call, causing duplicate entries.
      */
     @Override
+    @Deprecated
     public FunctionInvokeMessage addInput(String name, Object value) {
-        // 将控制参数添加到 inputs
-        if (controlParams != null && !controlParams.isEmpty()) {
-            controlParams.forEach((key, val) -> {
-                super.addInput(key, val);
-            });
-        }
-        // 添加控制类型
-        super.addInput("controlType", controlType != null ? controlType.getValue() : null);
         return super.addInput(name, value);
     }
-    
+
     /**
      * 设置会话信息（自动填充）
      */

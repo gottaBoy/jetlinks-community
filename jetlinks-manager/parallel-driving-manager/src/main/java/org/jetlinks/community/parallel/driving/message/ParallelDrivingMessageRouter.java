@@ -2,6 +2,8 @@ package org.jetlinks.community.parallel.driving.message;
 
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.web.authorization.exception.AccessDenyException;
+import org.jetlinks.community.parallel.driving.configuration.ParallelDrivingVehicleToCockpitProperties;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager;
 import org.jetlinks.community.parallel.driving.service.ParallelDrivingRelationService;
 import org.jetlinks.core.event.EventBus;
@@ -20,13 +22,8 @@ import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * 并行驾驶消息路由器
- * 负责驾驶舱-云端-车端的消息路由和转发
- *
- * @author JetLinks
- */
 @Component
 @Slf4j
 public class ParallelDrivingMessageRouter {
@@ -35,6 +32,13 @@ public class ParallelDrivingMessageRouter {
     private final ParallelDrivingRoomManager roomManager;
     private final EventBus eventBus;
     private final ParallelDrivingCustomMessageHandler customMessageHandler;
+    private final ParallelDrivingVehicleToCockpitProperties vehicleToCockpitProperties;
+    private final ParallelDrivingLatencyMetrics latencyMetrics;
+
+    /** Message dedup cache: messageId → timestamp. Prevents duplicate processing in cluster mode. */
+    private final ConcurrentHashMap<String, Long> processedMessages = new ConcurrentHashMap<>();
+    private static final long DEDUP_TTL_MS = 5000;
+    private static final int DEDUP_MAX_SIZE = 10000;
 
     /** remotejoystick 专用调度器：32 线程、10 万队列，与默认 boundedElastic 隔离，支撑 10Hz+ 高频转发 */
     private static final Scheduler REMOTE_JOYSTICK_SCHEDULER = Schedulers.newBoundedElastic(
@@ -44,11 +48,15 @@ public class ParallelDrivingMessageRouter {
     public ParallelDrivingMessageRouter(ParallelDrivingRelationService relationService,
                                         ParallelDrivingRoomManager roomManager,
                                         @Qualifier("eventBus") EventBus eventBus,
-                                        ParallelDrivingCustomMessageHandler customMessageHandler) {
+                                        ParallelDrivingCustomMessageHandler customMessageHandler,
+                                        ParallelDrivingVehicleToCockpitProperties vehicleToCockpitProperties,
+                                        @Autowired(required = false) ParallelDrivingLatencyMetrics latencyMetrics) {
         this.relationService = relationService;
         this.roomManager = roomManager;
         this.eventBus = eventBus;
         this.customMessageHandler = customMessageHandler;
+        this.vehicleToCockpitProperties = vehicleToCockpitProperties;
+        this.latencyMetrics = latencyMetrics;
     }
 
     private Disposable disposable;
@@ -70,8 +78,7 @@ public class ParallelDrivingMessageRouter {
                 "/org/*/device/parallel-driving-joystick/*/message/send/function",  // 带 org 前缀
                 "/org/*/device/parallel-driving-cockpit/*/message/send/function"
             )
-            .broker()
-            .local()
+            .features(Subscription.Feature.local, Subscription.Feature.broker)
             .build();
 
         // 订阅车端上报的状态和回复
@@ -83,11 +90,14 @@ public class ParallelDrivingMessageRouter {
             .topics(
                 "/device/parallel-driving-vehicle/*/message/property/report",      // 车辆属性上报
                 "/device/parallel-driving-vehicle/*/message/function/reply",        // 车辆功能回复
+                "/device/parallel-driving-vehicle/*/message/send/function",        // 车端上行功能调用（如 cloudLinkPing RTT）
                 "/device/parallel-driving-product/*/message/property/report",      // 兼容旧产品ID
-                "/device/parallel-driving-product/*/message/function/reply"        // 兼容旧产品ID
+                "/device/parallel-driving-product/*/message/function/reply",        // 兼容旧产品ID
+                "/device/parallel-driving-product/*/message/send/function",
+                "/org/*/device/parallel-driving-vehicle/*/message/send/function",
+                "/org/*/device/parallel-driving-product/*/message/send/function"
             )
-            .broker()
-            .local()
+            .features(Subscription.Feature.local, Subscription.Feature.broker)
             .build();
 
         // 拆分 cockpit 与 vehicle 流，避免互相抢占；cockpit 使用更高并发与 prefetch，车端 noReply 后主要瓶颈在驾驶舱
@@ -118,6 +128,10 @@ public class ParallelDrivingMessageRouter {
                                 log.warn("[驾驶舱->云端] remotejoystick 处理失败: deviceId={}, error={}", msg.getDeviceId(), e.getMessage());
                                 return Mono.empty();
                             });
+                    }
+                    if (isDuplicate(msg.getMessageId())) {
+                        log.debug("[驾驶舱->云端] 跳过重复消息: deviceId={}, messageId={}", msg.getDeviceId(), msg.getMessageId());
+                        return Mono.empty();
                     }
                     if (isEmergencyStop) {
                         return customMessageHandler.handleCustomMessage(msg)
@@ -157,7 +171,21 @@ public class ParallelDrivingMessageRouter {
                     }
                 })
                 .flatMap(msg -> {
-                    // 检查是否是自定义协议消息
+                    // 车云 RTT：车端上行 INVOKE_FUNCTION cloudLinkPing，平台立即回 FunctionInvokeMessageReply（与 MQTT/TCP 业务链路一致）
+                    if (msg instanceof FunctionInvokeMessage) {
+                        FunctionInvokeMessage inv = (FunctionInvokeMessage) msg;
+                        if ("cloudLinkPing".equals(inv.getFunctionId())) {
+                            long serverReceiveTimeMs = System.currentTimeMillis();
+                            Object clientTs = inv.getInput("clientSendTimeMs");
+                            log.info("[cloudLinkPing] recv_ping deviceId={} requestMessageId={} clientSendTimeMs={} serverReceiveTimeMs={}",
+                                inv.getDeviceId(), inv.getMessageId(), clientTs, serverReceiveTimeMs);
+                            return customMessageHandler.replyToCloudLinkPing(inv, serverReceiveTimeMs);
+                        }
+                    }
+                    if (isDuplicate(msg.getMessageId())) {
+                        log.debug("[车辆->云端] 跳过重复消息: deviceId={}, messageId={}", msg.getDeviceId(), msg.getMessageId());
+                        return Mono.<Void>empty();
+                    }
                     boolean isCustomProtocol = msg.getHeader("customProtocol")
                         .map(v -> Boolean.parseBoolean(String.valueOf(v)))
                         .orElse(false);
@@ -201,6 +229,26 @@ public class ParallelDrivingMessageRouter {
         if (disposable != null) {
             disposable.dispose();
         }
+        processedMessages.clear();
+    }
+
+    private boolean isDuplicate(String messageId) {
+        if (messageId == null || messageId.isEmpty()) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        Long prev = processedMessages.putIfAbsent(messageId, now);
+        if (prev != null && now - prev < DEDUP_TTL_MS) {
+            return true;
+        }
+        if (prev != null) {
+            processedMessages.put(messageId, now);
+        }
+        if (processedMessages.size() > DEDUP_MAX_SIZE) {
+            long cutoff = now - DEDUP_TTL_MS;
+            processedMessages.entrySet().removeIf(e -> e.getValue() < cutoff);
+        }
+        return false;
     }
 
     /**
@@ -334,10 +382,20 @@ public class ParallelDrivingMessageRouter {
      */
     public Mono<Void> handleVehicleFunctionReply(org.jetlinks.core.message.function.FunctionInvokeMessageReply reply) {
         String vehicleDeviceId = reply.getDeviceId();
-        
-        log.info("[车辆->云端] 收到车端功能调用回复: vehicle={}, functionId={}, success={}, messageId={}", 
-            vehicleDeviceId, reply.getFunctionId(), reply.isSuccess(), reply.getMessageId());
-        
+        String functionId = reply.getFunctionId();
+
+        log.info("[车辆->云端] 收到车端功能调用回复: vehicle={}, functionId={}, success={}, messageId={}",
+            vehicleDeviceId, functionId, reply.isSuccess(), reply.getMessageId());
+
+        if (!vehicleToCockpitProperties.shouldForwardStandardFunctionReplyToCockpit(functionId)) {
+            log.debug("[车辆->云端->驾驶舱] 跳过转发车端标准功能回复(不在白名单 parallel-driving.vehicle-to-cockpit.forward-reply-function-ids): vehicle={}, functionId={}, messageId={}",
+                vehicleDeviceId, functionId, reply.getMessageId());
+            if (latencyMetrics != null) {
+                latencyMetrics.recordVehicleReplyCockpitForwardSkipped(functionId);
+            }
+            return Mono.empty();
+        }
+
         // 1. 获取房间（通过车辆ID）
         return roomManager.getRoomByVehicle(vehicleDeviceId)
             .switchIfEmpty(Mono.defer(() -> {

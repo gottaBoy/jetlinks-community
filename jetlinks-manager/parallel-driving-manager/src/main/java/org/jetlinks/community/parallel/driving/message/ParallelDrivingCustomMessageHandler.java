@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.web.exception.BusinessException;
+import org.jetlinks.community.parallel.driving.configuration.ParallelDrivingVehicleToCockpitProperties;
 import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoom;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager;
@@ -13,11 +14,13 @@ import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.core.message.Headers;
 import org.jetlinks.core.message.function.FunctionInvokeMessage;
 import org.jetlinks.core.message.function.FunctionInvokeMessageReply;
+import org.jetlinks.core.message.function.FunctionParameter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Mono;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -39,6 +42,7 @@ public class ParallelDrivingCustomMessageHandler {
     private final ParallelDrivingRoomManager roomManager;
     private final DeviceRegistry deviceRegistry;
     private final ParallelDrivingLatencyMetrics latencyMetrics;
+    private final ParallelDrivingVehicleToCockpitProperties vehicleToCockpitProperties;
 
     /** remotejoystick 高频时缓存 cockpit->room，避免每条消息都查权限和房间，TTL 2 秒 */
     private final ConcurrentHashMap<String, CachedRoom> remotejoystickRoomCache = new ConcurrentHashMap<>();
@@ -91,10 +95,12 @@ public class ParallelDrivingCustomMessageHandler {
     public ParallelDrivingCustomMessageHandler(ParallelDrivingRelationService relationService,
                                                 ParallelDrivingRoomManager roomManager,
                                                 DeviceRegistry deviceRegistry,
+                                                ParallelDrivingVehicleToCockpitProperties vehicleToCockpitProperties,
                                                 @Autowired(required = false) ParallelDrivingLatencyMetrics latencyMetrics) {
         this.relationService = relationService;
         this.roomManager = roomManager;
         this.deviceRegistry = deviceRegistry;
+        this.vehicleToCockpitProperties = vehicleToCockpitProperties;
         this.latencyMetrics = latencyMetrics;
     }
 
@@ -595,6 +601,14 @@ public class ParallelDrivingCustomMessageHandler {
      */
     private Mono<Void> handleRemoteJoystickVehicleToCockpit(JSONObject customMsg, DeviceMessage deviceMessage,
             org.jetlinks.community.parallel.driving.room.ParallelDrivingRoom room) {
+        if (!vehicleToCockpitProperties.isForwardVehicleRemoteJoystickMirror()) {
+            log.debug("[车辆->云端->驾驶舱] 跳过车端 remotejoystick 镜像转发(未开启 parallel-driving.vehicle-to-cockpit.forward-vehicle-remote-joystick-mirror): vehicle={}",
+                deviceMessage.getDeviceId());
+            if (latencyMetrics != null) {
+                latencyMetrics.recordVehicleReplyCockpitForwardSkipped("remotejoystick_mirror");
+            }
+            return Mono.empty();
+        }
         String vehicleDeviceId = deviceMessage.getDeviceId();
         Object joystickdataObj = customMsg.get("joystickdata");
         if (joystickdataObj == null && deviceMessage instanceof FunctionInvokeMessage) {
@@ -894,7 +908,15 @@ public class ParallelDrivingCustomMessageHandler {
      */
     private Mono<Void> handleRemoteJoystickResponse(JSONObject customMsg, DeviceMessage deviceMessage) {
         String vehicleDeviceId = deviceMessage.getDeviceId();
-        
+        if (!vehicleToCockpitProperties.shouldForwardStandardFunctionReplyToCockpit("remotejoystick")) {
+            log.debug("[车辆->云端->驾驶舱] 跳过 remotejoystickresp 转发(不在白名单 parallel-driving.vehicle-to-cockpit.forward-reply-function-ids): vehicle={}",
+                vehicleDeviceId);
+            if (latencyMetrics != null) {
+                latencyMetrics.recordVehicleReplyCockpitForwardSkipped("remotejoystickresp");
+            }
+            return Mono.empty();
+        }
+
         // 从自定义消息中提取参数
         String id = customMsg.getString("id");
         String status = customMsg.getString("status");
@@ -983,5 +1005,68 @@ public class ParallelDrivingCustomMessageHandler {
             .then()
             .doOnError(error -> log.error("[车辆->云端->驾驶舱] 远程摇杆控制响应转发失败: vehicle={}", 
                 vehicleDeviceId, error));
+    }
+
+    /**
+     * 车云链路 RTT：响应车端上行的 {@code cloudLinkPing}（与 MQTT/网关业务路径一致）。
+     * <p>
+     * 车端流程建议：定时发起 functionId=cloudLinkPing（inputs 可带 pingId、clientSendTimeMs），
+     * 收到本回复后计算 RTT=收包时刻-发包时刻（建议用单调时钟），再将结果写入属性 {@code cloud_link_rtt_ms}
+     * 或 {@code chassis_status.cloud_link_rtt_ms}，随状态上报即可在远控页展示。
+     * <p>
+     * 另输出 {@code serverReceiveTimeMs}（路由入口时刻）、{@code serverReplyTimeMs}（组包下发前时刻），
+     * 车端可用 wall 时钟估算「纯网络」往返：{@code (clientRecv-clientSend) - (serverReply-serverReceive)}，
+     * 需车与平台 NTP 同步，结果写入 {@code cloud_link_network_rtt_ms}。
+     */
+    public Mono<Void> replyToCloudLinkPing(FunctionInvokeMessage invoke, long serverReceiveTimeMs) {
+        String deviceId = invoke.getDeviceId();
+        if (deviceId == null || deviceId.isEmpty()) {
+            log.warn("[cloudLinkPing] skip pong: missing deviceId requestMessageId={}", invoke.getMessageId());
+            return Mono.empty();
+        }
+        Map<String, Object> output = new HashMap<>();
+        for (FunctionParameter p : invoke.getInputs()) {
+            if (p == null || p.getName() == null) {
+                continue;
+            }
+            if ("pingId".equals(p.getName()) || "clientSendTimeMs".equals(p.getName())) {
+                output.put(p.getName(), p.getValue());
+            }
+        }
+        long serverReplyTimeMs = System.currentTimeMillis();
+        output.put("serverReceiveTimeMs", serverReceiveTimeMs);
+        output.put("serverReplyTimeMs", serverReplyTimeMs);
+        output.put("serverTimeMs", serverReplyTimeMs);
+
+        FunctionInvokeMessageReply reply = new FunctionInvokeMessageReply();
+        reply.setDeviceId(deviceId);
+        reply.setFunctionId("cloudLinkPing");
+        reply.setMessageId(java.util.UUID.randomUUID().toString());
+        reply.addHeader("requestMessageId", invoke.getMessageId());
+        reply.addHeader("requestId", invoke.getMessageId());
+        reply.setTimestamp(serverReplyTimeMs);
+        reply.setSuccess(true);
+        reply.setOutput(output);
+
+        String replyMessageId = reply.getMessageId();
+        log.info("[cloudLinkPing] send_pong deviceId={} requestMessageId={} replyMessageId={} serverReceiveTimeMs={} serverReplyTimeMs={} platformProcessMs={}",
+            deviceId, invoke.getMessageId(), replyMessageId, serverReceiveTimeMs, serverReplyTimeMs,
+            Math.max(0, serverReplyTimeMs - serverReceiveTimeMs));
+
+        // 使用 sendAndForget：send() 会等待设备对下行消息的协议应答，TCP 车端收到 INVOKE_FUNCTION_REPLY 后通常不回包，导致 DefaultDeviceMessageSender 超时
+        return deviceRegistry.getDevice(deviceId)
+            .switchIfEmpty(Mono.defer(() -> {
+                log.warn("[cloudLinkPing] skip pong: device not in registry deviceId={} requestMessageId={}",
+                    deviceId, invoke.getMessageId());
+                return Mono.empty();
+            }))
+            .flatMap(op -> op.messageSender().sendAndForget(reply).then())
+            .doOnSuccess(v -> log.debug("[cloudLinkPing] send_pong_done deviceId={} requestMessageId={}",
+                deviceId, invoke.getMessageId()))
+            .onErrorResume(err -> {
+                log.warn("[cloudLinkPing] send_pong_fail deviceId={} requestMessageId={} err={}",
+                    deviceId, invoke.getMessageId(), err.getMessage());
+                return Mono.empty();
+            });
     }
 }

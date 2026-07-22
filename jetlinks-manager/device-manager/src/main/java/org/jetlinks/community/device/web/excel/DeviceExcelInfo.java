@@ -54,6 +54,9 @@ public class DeviceExcelInfo implements Jsonable {
     @NotBlank(message = "设备名称不能为空")
     private String name;
 
+    @org.jetlinks.community.io.excel.annotation.ExcelHeader(value = "内部编号")
+    private String internalCode;
+
     @org.jetlinks.community.io.excel.annotation.ExcelHeader(value = "产品名称", ignoreRead = true)
     private String productName;
 
@@ -186,6 +189,7 @@ public class DeviceExcelInfo implements Jsonable {
         mapping.put("设备ID", "id");
         mapping.put("设备名称", "name");
         mapping.put("名称", "name");
+        mapping.put("内部编号", "internalCode");
 
 //        mapping.put("设备型号", "productName");
 //        mapping.put("产品型号", "productName");

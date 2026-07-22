@@ -212,6 +212,15 @@
     </profiles>
 
     <dependencies>
+        <!-- jetlinks-supports must be declared first to ensure its modified
+             ServiceMethodInvoker class is loaded before the original from
+             scalecube-services-api (which arrives transitively via io-component) -->
+        <dependency>
+            <groupId>org.jetlinks</groupId>
+            <artifactId>jetlinks-supports</artifactId>
+            <version>${jetlinks.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.jetlinks.community</groupId>
             <artifactId>common-component</artifactId>
@@ -316,9 +325,9 @@
         </dependency>
 
         <dependency>
-            <groupId>org.jetlinks</groupId>
-            <artifactId>jetlinks-supports</artifactId>
-            <version>${jetlinks.version}</version>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>zota-integration</artifactId>
+            <version>${project.version}</version>
         </dependency>
 
         <dependency>

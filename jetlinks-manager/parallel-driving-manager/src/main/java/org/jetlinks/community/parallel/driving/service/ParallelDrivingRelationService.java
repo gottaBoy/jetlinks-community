@@ -1,4 +1,4 @@
- package org.jetlinks.community.parallel.driving.service;
+package org.jetlinks.community.parallel.driving.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.ezorm.rdb.mapping.ReactiveRepository;
@@ -12,14 +12,17 @@ import org.jetlinks.community.parallel.driving.entity.ParallelDrivingSession;
 import org.jetlinks.community.parallel.driving.enums.ParallelDrivingSessionState;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
+import org.hswebframework.ezorm.rdb.operator.dml.query.SortOrder;
 import org.jetlinks.core.message.Headers;
 import org.jetlinks.core.message.function.FunctionInvokeMessage;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Objects;
@@ -41,16 +44,22 @@ public class ParallelDrivingRelationService {
     private final ReactiveRepository<ParallelDrivingSession, String> sessionRepository;
     private final DeviceRegistry deviceRegistry;
     private final org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager roomManager;
+    private final ReactiveRedisTemplate<Object, Object> redis;
+
+    private static final String TAKEOVER_LOCK_PREFIX = "pd:lock:vehicle:";
+    private static final Duration TAKEOVER_LOCK_TTL = Duration.ofSeconds(30);
 
     @Autowired
     public ParallelDrivingRelationService(ReactiveRepository<ParallelDrivingBinding, String> bindingRepository,
                                          ReactiveRepository<ParallelDrivingSession, String> sessionRepository,
                                          DeviceRegistry deviceRegistry,
-                                         org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager roomManager) {
+                                         org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager roomManager,
+                                         ReactiveRedisTemplate<Object, Object> redis) {
         this.bindingRepository = bindingRepository;
         this.sessionRepository = sessionRepository;
         this.deviceRegistry = deviceRegistry;
         this.roomManager = roomManager;
+        this.redis = redis;
     }
 
     /**
@@ -547,11 +556,23 @@ public class ParallelDrivingRelationService {
      * @return Mono<ParallelDrivingSession>
      */
     public Mono<ParallelDrivingSession> getSession(String cockpitId, String vehicleId) {
+        // Prefer ACTIVE session first to avoid reading stale BINDING records.
         return sessionRepository.createQuery()
             .where(ParallelDrivingSession::getCockpitDeviceId, cockpitId)
             .and(ParallelDrivingSession::getVehicleDeviceId, vehicleId)
+            .and(ParallelDrivingSession::getSessionState, ParallelDrivingSessionState.ACTIVE)
+            .orderBy(SortOrder.desc(ParallelDrivingSession::getLastActiveTime))
+            .orderBy(SortOrder.desc(ParallelDrivingSession::getBindTime))
             .fetch()
-            .next();
+            .next()
+            .switchIfEmpty(
+                sessionRepository.createQuery()
+                    .where(ParallelDrivingSession::getCockpitDeviceId, cockpitId)
+                    .and(ParallelDrivingSession::getVehicleDeviceId, vehicleId)
+                    .orderBy(SortOrder.desc(ParallelDrivingSession::getBindTime))
+                    .fetch()
+                    .next()
+            );
     }
 
     /**
@@ -592,15 +613,30 @@ public class ParallelDrivingRelationService {
      */
     public Mono<Void> updateSessionState(String cockpitId, String vehicleId,
                                          ParallelDrivingSessionState state) {
+        // 先查询确认会话存在，并记录 sessionId / fromState 用于日志追踪
         return sessionRepository.createQuery()
             .where(ParallelDrivingSession::getCockpitDeviceId, cockpitId)
             .and(ParallelDrivingSession::getVehicleDeviceId, vehicleId)
+            .orderBy(SortOrder.desc(ParallelDrivingSession::getBindTime))
             .fetch()
             .next()
+            .switchIfEmpty(Mono.error(new BusinessException(
+                "更新会话状态失败：会话不存在 cockpit=" + cockpitId + ", vehicle=" + vehicleId + ", targetState=" + state)))
             .flatMap(session -> {
-                session.setSessionState(state);
-                session.setLastActiveTime(System.currentTimeMillis());
-                return sessionRepository.save(session);
+                String fromState = session.getState();
+                String sessionId = session.getId();
+                long now = System.currentTimeMillis();
+                log.info("更新会话状态: cockpit={}, vehicle={}, sessionId={}, from={}, to={}",
+                    cockpitId, vehicleId, sessionId, fromState, state.getValue());
+                // 使用 createUpdate 直接设置指定列，避免 save() 受 @DefaultValue 影响跳过 state 字段写入
+                return sessionRepository.createUpdate()
+                    .set(ParallelDrivingSession::getState, state.getValue())
+                    .set(ParallelDrivingSession::getLastActiveTime, now)
+                    .where(ParallelDrivingSession::getCockpitDeviceId, cockpitId)
+                    .and(ParallelDrivingSession::getVehicleDeviceId, vehicleId)
+                    .execute()
+                    .doOnNext(rows -> log.info("会话状态UPDATE结果: sessionId={}, from={}, to={}, updatedRows={}",
+                        sessionId, fromState, state.getValue(), rows));
             })
             .then()
             .doOnSuccess(v -> log.info("更新会话状态成功: cockpit={}, vehicle={}, state={}",
@@ -672,6 +708,22 @@ public class ParallelDrivingRelationService {
     public Mono<ParallelDrivingSession> takeover(String cockpitDeviceId, String vehicleDeviceId) {
         log.info("开始远程接管: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
 
+        String lockKey = TAKEOVER_LOCK_PREFIX + vehicleDeviceId;
+
+        return redis.opsForValue()
+            .setIfAbsent(lockKey, cockpitDeviceId, TAKEOVER_LOCK_TTL)
+            .flatMap(acquired -> {
+                if (!Boolean.TRUE.equals(acquired)) {
+                    return Mono.error(new BusinessException(
+                        "车辆[" + vehicleDeviceId + "]正在被其他驾驶舱接管中，请稍后重试"));
+                }
+
+                return doTakeover(cockpitDeviceId, vehicleDeviceId)
+                    .doFinally(signal -> redis.delete(lockKey).subscribe());
+            });
+    }
+
+    private Mono<ParallelDrivingSession> doTakeover(String cockpitDeviceId, String vehicleDeviceId) {
         // 1. 验证设备存在和在线
         return Mono.zip(
             deviceRegistry.getDevice(cockpitDeviceId)
@@ -711,16 +763,36 @@ public class ParallelDrivingRelationService {
         })
         // 5. 解除旧会话（如果存在）
         .then(removeOldSessions(cockpitDeviceId, vehicleDeviceId))
+        // 5b. 清理同一驾驶舱-车辆的残留会话，避免旧 binding 干扰后续状态读取
+        .then(deleteSession(cockpitDeviceId, vehicleDeviceId))
         // 6. 创建新会话（状态：BINDING）
         .then(createSession(cockpitDeviceId, vehicleDeviceId, ParallelDrivingSessionState.BINDING))
         // 7. 创建房间
-        .then(roomManager.createRoom(cockpitDeviceId, vehicleDeviceId).then())
+        .then(Mono.defer(() -> {
+            log.info("接管阶段[createRoom] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
+            return roomManager.createRoom(cockpitDeviceId, vehicleDeviceId)
+                .doOnSuccess(room -> log.info("接管阶段[createRoom] 完成: roomId={}", room != null ? room.getRoomId() : null))
+                .then();
+        }))
         // 8. 通知双方设备
-        .then(notifyDevicesTakeover(cockpitDeviceId, vehicleDeviceId))
+        .then(Mono.defer(() -> {
+            log.info("接管阶段[notifyDevicesTakeover] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
+            return notifyDevicesTakeover(cockpitDeviceId, vehicleDeviceId)
+                .doOnSuccess(v -> log.info("接管阶段[notifyDevicesTakeover] 完成: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId));
+        }))
         // 9. 更新状态为 ACTIVE
-        .then(updateSessionState(cockpitDeviceId, vehicleDeviceId,
-                                 ParallelDrivingSessionState.ACTIVE))
-        .then(getSession(cockpitDeviceId, vehicleDeviceId))
+        .then(Mono.defer(() -> {
+            log.info("接管阶段[updateSessionState->ACTIVE] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
+            return updateSessionState(cockpitDeviceId, vehicleDeviceId,
+                                      ParallelDrivingSessionState.ACTIVE)
+                .doOnSuccess(v -> log.info("接管阶段[updateSessionState->ACTIVE] 完成: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId));
+        }))
+        .then(Mono.defer(() -> {
+            log.info("接管阶段[waitSessionActive] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
+            return waitSessionActive(cockpitDeviceId, vehicleDeviceId)
+                .doOnSuccess(session -> log.info("接管阶段[waitSessionActive] 完成: state={}",
+                    session != null ? session.getState() : null));
+        }))
         .doOnSuccess(session -> log.info("远程接管成功: cockpit={}, vehicle={}, state={}",
             cockpitDeviceId, vehicleDeviceId, session != null ? session.getSessionState() : null))
         .doOnError(error -> log.error("远程接管失败: cockpit={}, vehicle={}",
@@ -862,6 +934,27 @@ public class ParallelDrivingRelationService {
             log.warn("通知设备释放失败: cockpit={}, vehicle={}", cockpitId, vehicleId, error);
             return Mono.empty();  // 通知失败不影响主流程
         });
+    }
+
+    /**
+     * 接管完成后会话可能短暂处于 binding，轮询等待 ACTIVE 再返回，避免返回“假成功”。
+     */
+    private Mono<ParallelDrivingSession> waitSessionActive(String cockpitDeviceId, String vehicleDeviceId) {
+        return Flux.interval(Duration.ZERO, Duration.ofMillis(200))
+            .take(20)
+            .concatMap(i -> getSession(cockpitDeviceId, vehicleDeviceId))
+            .filter(session -> session != null && session.isActive())
+            .next()
+            .switchIfEmpty(
+                getSession(cockpitDeviceId, vehicleDeviceId)
+                    .flatMap(session -> Mono.<ParallelDrivingSession>error(new BusinessException(
+                        "接管未完成，会话状态: " + session.getState() +
+                            "，sessionId=" + session.getId() +
+                            "，bindTime=" + session.getBindTime() +
+                            "，lastActiveTime=" + session.getLastActiveTime() +
+                            "，请重试或先释放后再接管")))
+                    .switchIfEmpty(Mono.<ParallelDrivingSession>error(new BusinessException("接管未完成，会话不存在，请重试")))
+            );
     }
 }
 

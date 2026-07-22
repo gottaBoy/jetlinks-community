@@ -1,0 +1,188 @@
+version: '3.8'
+
+x-jetlinks-common: &jetlinks-common
+  image: registry.cn-shenzhen.aliyuncs.com/jetlinks/jetlinks-community:2.10.0-SNAPSHOT
+  environment: &jetlinks-env
+    JAVA_OPTS: "-Duser.language=zh -Xms512m -Xmx2g"
+    TZ: Asia/Shanghai
+    CLUSTER_ID: pd-cluster
+    CLUSTER_SEED_1: node-1:13800
+    CLUSTER_SEED_2: node-2:13800
+    CLUSTER_SEED_3: node-3:13800
+    EXTERNAL_HOST: nginx
+    EXTERNAL_PORT: "8848"
+    ADMIN_USER_PASSWORD: "${ADMIN_PASSWORD:-JetLinks.C0mmVn1ty}"
+    spring.profiles.active: default,dev,cluster
+    spring.r2dbc.url: r2dbc:postgresql://postgres:5432/jetlinks
+    spring.r2dbc.username: postgres
+    spring.r2dbc.password: "${POSTGRES_PASSWORD:-JetLinks@postgres}"
+    spring.data.redis.host: redis
+    spring.data.redis.port: "6379"
+    spring.data.redis.password: "${REDIS_PASSWORD:-JetLinks@redis}"
+    spring.elasticsearch.uris: http://elasticsearch:9200
+    file.manager.storage-base-path: /application/data/files
+    logging.level.org.jetlinks: warn
+    logging.level.org.springframework: warn
+    logging.level.org.hswebframework: warn
+    hsweb.cors.enable: "true"
+    hsweb.cors.configs[0].path: "/**"
+    hsweb.cors.configs[0].allowed-headers: "*"
+    hsweb.cors.configs[0].allowed-origins: "${CORS_ALLOWED_ORIGINS:-http://localhost:9000}"
+    hsweb.cors.configs[0].allowed-methods[0]: GET
+    hsweb.cors.configs[0].allowed-methods[1]: POST
+    hsweb.cors.configs[0].allowed-methods[2]: PUT
+    hsweb.cors.configs[0].allowed-methods[3]: PATCH
+    hsweb.cors.configs[0].allowed-methods[4]: DELETE
+    hsweb.cors.configs[0].allowed-methods[5]: OPTIONS
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    elasticsearch:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "curl -sf http://localhost:8848/actuator/health || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 90s
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:6.2-alpine
+    container_name: cluster-redis
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-JetLinks@redis}"
+    environment:
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-JetLinks@redis} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - cluster-net
+
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: cluster-postgres
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-JetLinks@postgres}"
+      POSTGRES_DB: jetlinks
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cluster-net
+
+  elasticsearch:
+    image: elasticsearch:7.17.6
+    container_name: cluster-es
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx1g"
+      TZ: Asia/Shanghai
+    # Host prerequisite: sysctl -w vm.max_map_count=262144
+    # Add to /etc/sysctl.conf for persistence: vm.max_map_count=262144
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - cluster-net
+
+  node-1:
+    <<: *jetlinks-common
+    container_name: jetlinks-node-1
+    hostname: node-1
+    environment:
+      <<: *jetlinks-env
+      JETLINKS_SERVER_ID: node-1
+      CLUSTER_HOST: node-1
+      CLUSTER_PORT: "13800"
+      CLUSTER_RPC_PORT: "13900"
+    volumes:
+      - node1-data:/application/data
+    networks:
+      - cluster-net
+
+  node-2:
+    <<: *jetlinks-common
+    container_name: jetlinks-node-2
+    hostname: node-2
+    environment:
+      <<: *jetlinks-env
+      JETLINKS_SERVER_ID: node-2
+      CLUSTER_HOST: node-2
+      CLUSTER_PORT: "13800"
+      CLUSTER_RPC_PORT: "13900"
+    volumes:
+      - node2-data:/application/data
+    networks:
+      - cluster-net
+
+  node-3:
+    <<: *jetlinks-common
+    container_name: jetlinks-node-3
+    hostname: node-3
+    environment:
+      <<: *jetlinks-env
+      JETLINKS_SERVER_ID: node-3
+      CLUSTER_HOST: node-3
+      CLUSTER_PORT: "13800"
+      CLUSTER_RPC_PORT: "13900"
+    volumes:
+      - node3-data:/application/data
+    networks:
+      - cluster-net
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cluster-nginx
+    ports:
+      - "8848:8848"
+      - "1883:1883"
+      - "8800:8800"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx-stream.conf:/etc/nginx/stream.conf:ro
+      - ./nginx-main.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      node-1:
+        condition: service_healthy
+      node-2:
+        condition: service_healthy
+      node-3:
+        condition: service_healthy
+    networks:
+      - cluster-net
+
+volumes:
+  redis-data:
+  pg-data:
+  es-data:
+  node1-data:
+  node2-data:
+  node3-data:
+
+networks:
+  cluster-net:
+    driver: bridge

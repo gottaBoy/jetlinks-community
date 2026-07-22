@@ -20,6 +20,9 @@ public class VehicleInfo {
     
     @Schema(description = "设备名称")
     private String deviceName;
+
+    @Schema(description = "内部编号（如 ZSD-DP010）")
+    private String internalCode;
     
     @Schema(description = "产品ID")
     private String productId;

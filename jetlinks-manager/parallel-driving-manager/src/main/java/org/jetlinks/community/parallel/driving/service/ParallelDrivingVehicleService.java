@@ -138,6 +138,7 @@ public class ParallelDrivingVehicleService {
                 VehicleInfo info = new VehicleInfo();
                 info.setDeviceId(device.getId());
                 info.setDeviceName(device.getName());
+                info.setInternalCode(device.getInternalCode());
                 info.setProductId(device.getProductId());
                 info.setState(state);
 
@@ -176,6 +177,7 @@ public class ParallelDrivingVehicleService {
                         VehicleInfo info = new VehicleInfo();
                         info.setDeviceId(device.getId());
                         info.setDeviceName(device.getName());
+                        info.setInternalCode(device.getInternalCode());
                         info.setProductId(device.getProductId());
                         info.setState(state);
 

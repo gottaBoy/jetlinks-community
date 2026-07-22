@@ -27,6 +27,9 @@ public class DeviceInstanceImportExportEntity {
     @ExcelProperty("设备名称")
     private String name;
 
+    @ExcelProperty("内部编号")
+    private String internalCode;
+
     @ExcelProperty("产品名称")
     private String productName;
 

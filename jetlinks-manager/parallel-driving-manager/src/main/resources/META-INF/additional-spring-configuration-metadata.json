@@ -1,0 +1,23 @@
+{
+  "groups": [
+    {
+      "name": "parallel-driving.vehicle-to-cockpit",
+      "type": "org.jetlinks.community.parallel.driving.configuration.ParallelDrivingVehicleToCockpitProperties",
+      "description": "车端消息转发至驾驶舱 TCP：白名单避免高频 reply 灌舱；Micrometer 指标 parallel_driving.vehicle_reply.cockpit_forward_skipped 统计被拦截的 function（标签 function）。"
+    }
+  ],
+  "properties": [
+    {
+      "name": "parallel-driving.vehicle-to-cockpit.forward-reply-function-ids",
+      "type": "java.util.Set<java.lang.String>",
+      "description": "允许转发到驾驶舱的车端标准功能回复 functionId（小写匹配）。默认仅 emergencystop。勿将 remotejoystick 列入除非舱端必须逐条收 reply。",
+      "defaultValue": "emergencystop"
+    },
+    {
+      "name": "parallel-driving.vehicle-to-cockpit.forward-vehicle-remote-joystick-mirror",
+      "type": "java.lang.Boolean",
+      "description": "是否将车端上行的 remotejoystick 镜像转发给驾驶舱。默认 false 以降低舱 TCP 负载；需车端摇杆回显时设为 true。",
+      "defaultValue": false
+    }
+  ]
+}

@@ -62,7 +62,8 @@ import java.util.stream.Stream;
 @Table(name = "dev_device_instance", indexes = {
     @Index(name = "idx_dev_product_id", columnList = "product_id"),
     @Index(name = "idx_dev_parent_id", columnList = "parent_id"),
-    @Index(name = "idx_dev_state", columnList = "state")
+    @Index(name = "idx_dev_state", columnList = "state"),
+    @Index(name = "idx_dev_internal_code", columnList = "internal_code")
 })
 @Comment("设备信息表")
 @EnableEntityEvent
@@ -84,6 +85,10 @@ public class DeviceInstanceEntity extends GenericEntity<String> implements Recor
     @NotBlank(message = "设备名称不能为空", groups = CreateGroup.class)
     @Schema(description = "设备名称")
     private String name;
+
+    @Column(name = "internal_code", length = 64)
+    @Schema(description = "内部编号（如车队代号 ZSD-DP010），可选")
+    private String internalCode;
 
     @Column
     @ColumnType(javaType = String.class)
@@ -338,6 +343,7 @@ public class DeviceInstanceEntity extends GenericEntity<String> implements Recor
         return Arrays.asList(
             SimplePropertyMetadata.of("id", "设备id", StringType.GLOBAL),
             SimplePropertyMetadata.of("name", "设备名称", StringType.GLOBAL),
+            SimplePropertyMetadata.of("internalCode", "内部编号", StringType.GLOBAL),
             SimplePropertyMetadata.of("deviceType", "设备类型", new EnumType()
                 .addElement(EnumType.Element.of("device", "直连设备"))
                 .addElement(EnumType.Element.of("childrenDevice", "网关子设备"))
