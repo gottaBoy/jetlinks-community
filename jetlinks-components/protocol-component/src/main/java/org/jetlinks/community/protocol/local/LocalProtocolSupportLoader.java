@@ -17,6 +17,7 @@ package org.jetlinks.community.protocol.local;
 
 import lombok.AllArgsConstructor;
 import lombok.Generated;
+import lombok.extern.slf4j.Slf4j;
 import org.jetlinks.community.protocol.CommandSupportServiceContext;
 import org.jetlinks.community.protocol.CompositeServiceContext;
 import org.jetlinks.community.protocol.monitor.ProtocolMonitorHelper;
@@ -30,6 +31,7 @@ import reactor.core.scheduler.Schedulers;
 import java.io.File;
 import java.io.FileNotFoundException;
 
+@Slf4j
 @AllArgsConstructor
 @Generated
 public class LocalProtocolSupportLoader implements ProtocolSupportLoaderProvider {
@@ -59,9 +61,15 @@ public class LocalProtocolSupportLoader implements ProtocolSupportLoaderProvider
                     .map(String::trim)
                     .orElse(null);
 
+                log.info("LocalProtocolSupportLoader: rawConfig={}, location='{}', provider='{}'",
+                    definition.getConfiguration(), location, provider);
+
                 File file = new File(location);
+                log.info("LocalProtocolSupportLoader: file.absolutePath={}, file.exists={}, cwd={}",
+                    file.getAbsolutePath(), file.exists(), System.getProperty("user.dir"));
+
                 if (!file.exists()) {
-                    throw new FileNotFoundException("文件" + file.getName() + "不存在");
+                    throw new FileNotFoundException("文件" + file.getName() + "不存在，绝对路径:" + file.getAbsolutePath());
                 }
 
                 LocalFileProtocolSupport support = new LocalFileProtocolSupport();

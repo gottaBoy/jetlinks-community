@@ -31,6 +31,7 @@
         <module>timescaledb-component</module>
         <module>datasource-component</module>
         <module>plugin-component</module>
+        <module>firmware-component</module>
     </modules>
 
     <artifactId>jetlinks-components</artifactId>

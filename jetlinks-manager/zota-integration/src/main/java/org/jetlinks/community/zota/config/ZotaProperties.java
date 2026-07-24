@@ -22,11 +22,11 @@ public class ZotaProperties {
     private String mgmtPassword = "admin";
 
     /** DMF RabbitMQ queue name — must match HawkBit DMF configuration */
-    private String dmfQueue = "hawkbit.dmf.queue";
+    private String dmfQueue = "zota.dmf.queue";
 
     /** DMF exchange name */
-    private String dmfExchange = "hawkbit.dmf.exchange";
+    private String dmfExchange = "zota.dmf.exchange";
 
     /** DMF routing key for OTA events */
-    private String dmfRoutingKey = "hawkbit.dmf.#";
+    private String dmfRoutingKey = "zota.dmf.#";
 }

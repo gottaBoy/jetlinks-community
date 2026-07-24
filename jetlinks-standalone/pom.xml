@@ -163,6 +163,12 @@
                     <artifactId>timescaledb-component</artifactId>
                 </dependency>
 
+                <!-- 固件管理（对标 JetLinks Pro） -->
+                <dependency>
+                    <groupId>org.jetlinks.community</groupId>
+                    <artifactId>firmware-component</artifactId>
+                </dependency>
+
             </dependencies>
         </profile>
 

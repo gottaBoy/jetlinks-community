@@ -241,6 +241,8 @@ public class LocalProtocolSupportManager
         if (definition == null || definition.getState() != 1) {
             return Mono.empty();
         }
+        log.info("checkProtocol: id={}, provider={}, config={}",
+            definition.getId(), definition.getProvider(), definition.getConfiguration());
         return loader
             //加载一下检验是否正确，然后就卸载
             .load(definition)
@@ -248,6 +250,8 @@ public class LocalProtocolSupportManager
             .thenReturn(definition)
             .as(LocaleUtils::transform)
             .onErrorMap(err -> {
+                log.error("checkProtocol failed: id={}, provider={}, error={}",
+                    definition.getId(), definition.getProvider(), err.toString(), err);
                 BusinessException e = new BusinessException("error.unable_to_load_protocol", 500, err.getLocalizedMessage());
                 e.addSuppressed(err);
                 return e;
