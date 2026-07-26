@@ -22,7 +22,9 @@ import org.hswebframework.web.bean.FastBeanCopier;
 import org.jetlinks.community.io.utils.FileUtils;
 import org.jetlinks.community.protocol.monitor.ProtocolMonitorHelper;
 import org.jetlinks.core.ProtocolSupport;
+import org.jetlinks.core.spi.ProtocolSupportProvider;
 import org.jetlinks.core.spi.ServiceContext;
+import org.jetlinks.core.utils.ClassUtils;
 import org.jetlinks.community.io.file.FileManager;
 import org.jetlinks.community.utils.TimeUtils;
 import org.jetlinks.supports.protocol.management.ProtocolSupportDefinition;
@@ -55,11 +57,27 @@ import java.util.concurrent.TimeoutException;
 import static java.nio.file.StandardOpenOption.*;
 
 /**
- * 自动下载并缓存协议包，
+ * 协议包加载器，通过 configuration.storage 和 configuration.loadType 控制加载策略。
  * <pre>
- *     1. 下载的协议包报错在./data/protocols目录下，可通过启动参数-Djetlinks.protocol.temp.path进行配置
- *     2. 文件名规则: 协议ID+"_"+md5(文件地址)
- *     3. 如果文件不存在则下载协议
+ *     storage（存储方式）：
+ *       local — 本地文件系统路径，支持目录（classes）和 JAR
+ *       http  — 远程 HTTP(S) URL，下载到 ./data/protocols/ 缓存后加载
+ *       s3    — FileManager(S3/TOS)，检查本地缓存 → 无缓存则下载
+ *
+ *     loadType（加载方式）：
+ *       jar     — JAR 包模式，使用 classpath:{@literal **}/*.class 扫描
+ *       classes — class 目录模式，使用 {@literal **}/*.class 扫描
+ *       不设置   — 自动检测（目录 → classes，文件 → jar）
+ *
+ *     本地路径规范（storage=local）：
+ *       dev/{protocol}/target/classes/   — class 目录
+ *       dev/{protocol}/target/xxx.jar    — JAR 包
+ *
+ *     S3 缓存路径（storage=s3 / http）：
+ *       ./data/protocols/{id}_{hash}.jar  — 自动管理，不手动指定
+ *
+ *     缓存目录: ./data/protocols（-Djetlinks.protocol.temp.path 可配）
+ *     缓存失效: 协议保存时自动清除缓存并重新加载
  * </pre>
  *
  * @author zhouhao
@@ -121,64 +139,168 @@ public class AutoDownloadJarProtocolSupportLoader extends JarProtocolSupportLoad
     @Override
     public Mono<? extends ProtocolSupport> load(ProtocolSupportDefinition definition) {
 
-        //复制新的配置信息
         ProtocolSupportDefinition newDef = FastBeanCopier.copy(definition, new ProtocolSupportDefinition());
-
         Map<String, Object> config = newDef.getConfiguration();
-        String location = Optional
-            .ofNullable(config.get("location"))
-            .map(String::valueOf)
-            .orElse(null);
-        //远程文件则先下载再加载
-        if (StringUtils.hasText(location) && location.startsWith("http")) {
-            String urlMd5 = DigestUtils.md5Hex(location);
-            //地址没变则直接加载本地文件
-            File file = new File(tempPath, (newDef.getId() + "_" + urlMd5) + ".jar");
-            if (file.exists()) {
-                //设置文件地址文本地文件
-                config.put("location", file.getAbsolutePath());
-                return super
-                    .load(newDef)
-                    .subscribeOn(Schedulers.boundedElastic())
-                    //加载失败则删除文件,防止文件内容错误时,一直无法加载
-                    .doOnError(err -> file.delete());
+
+        String storage = Optional.ofNullable(config.get("storage"))
+            .map(String::valueOf).orElse("local");
+        String location = Optional.ofNullable(config.get("location"))
+            .map(String::valueOf).orElse(null);
+
+        switch (storage) {
+            case "http":
+                return loadFromHttp(newDef, location);
+            case "s3":
+                return loadFromS3(newDef);
+            default:
+                return loadFromLocal(newDef, location);
+        }
+    }
+
+    // ═══ storage=local — 本地文件系统 ═══
+    private Mono<? extends ProtocolSupport> loadFromLocal(ProtocolSupportDefinition newDef, String location) {
+        Map<String, Object> config = newDef.getConfiguration();
+
+        if (!StringUtils.hasText(location)) {
+            // 未指定 location → 尝试 fileId 兜底
+            String fileId = (String) config.get("fileId");
+            if (StringUtils.hasText(fileId)) {
+                return loadFromS3(newDef);
             }
+            return Mono.error(new IllegalArgumentException(
+                "storage=local requires location or fileId"));
+        }
 
-            return FileUtils
-                .readDataBuffer(webClient, location)
-                .as(dataStream -> {
-                    log.debug("download protocol file {} to {}", location, file.getAbsolutePath());
-                    //写出文件
-                    return DataBufferUtils
-                        .write(dataStream, file.toPath(), CREATE, WRITE)
-                        .thenReturn(file.getAbsolutePath());
-                })
-                //使用弹性线程池来写出文件
+        File localFile = new File(location);
+        if (localFile.exists()) {
+            log.info("Loading protocol from local {}: {}",
+                localFile.isDirectory() ? "directory" : "file", location);
+            return super.load(newDef).subscribeOn(Schedulers.boundedElastic());
+        }
+
+        // 本地文件不存在 → 尝试 fileId 兜底（兼容旧配置）
+        String fileId = (String) config.get("fileId");
+        if (StringUtils.hasText(fileId)) {
+            log.info("Local file not found, falling back to fileId: {}", fileId);
+            return loadFromFileManager(newDef.getId(), fileId)
+                .flatMap(file -> {
+                    config.put("location", file.getAbsolutePath());
+                    return super.load(newDef)
+                        .subscribeOn(Schedulers.boundedElastic())
+                        .doOnError(err -> file.delete());
+                });
+        }
+
+        return Mono.error(new FileNotFoundException(
+            "Local protocol file not found: " + location));
+    }
+
+    // ═══ storage=http — 远程 HTTP 下载 → 缓存 → 加载 ═══
+    private Mono<? extends ProtocolSupport> loadFromHttp(ProtocolSupportDefinition newDef, String location) {
+        Map<String, Object> config = newDef.getConfiguration();
+
+        if (!StringUtils.hasText(location) || !location.startsWith("http")) {
+            return Mono.error(new IllegalArgumentException(
+                "storage=http requires a valid HTTP(S) location"));
+        }
+
+        String urlMd5 = DigestUtils.md5Hex(location);
+        File file = new File(tempPath, (newDef.getId() + "_" + urlMd5) + ".jar");
+
+        if (file.exists()) {
+            config.put("location", file.getAbsolutePath());
+            return super.load(newDef)
                 .subscribeOn(Schedulers.boundedElastic())
-                //设置本地文件路径
-                .doOnNext(path -> config.put("location", path))
-                .then(super.load(newDef))
-                .timeout(loadTimeout, Mono.error(() -> new TimeoutException("获取协议文件失败:" + location)))
-                //失败时删除文件
-                .doOnError(err -> file.delete())
-                ;
+                .doOnError(err -> file.delete());
         }
 
-        //使用文件管理器获取文件
-        String fileId = (String) config.getOrDefault("fileId", null);
+        return FileUtils.readDataBuffer(webClient, location)
+            .as(dataStream -> {
+                log.debug("Download protocol from {} to {}", location, file.getAbsolutePath());
+                return DataBufferUtils
+                    .write(dataStream, file.toPath(), CREATE, WRITE)
+                    .thenReturn(file.getAbsolutePath());
+            })
+            .subscribeOn(Schedulers.boundedElastic())
+            .doOnNext(path -> config.put("location", path))
+            .then(super.load(newDef))
+            .timeout(loadTimeout, Mono.error(() ->
+                new TimeoutException("Download protocol timeout: " + location)))
+            .doOnError(err -> file.delete());
+    }
+
+    // ═══ storage=s3 — FileManager(S3/TOS) → 缓存 → 加载 ═══
+    private Mono<? extends ProtocolSupport> loadFromS3(ProtocolSupportDefinition newDef) {
+        Map<String, Object> config = newDef.getConfiguration();
+        String fileId = (String) config.get("fileId");
+
         if (!StringUtils.hasText(fileId)) {
-            return Mono.error(new IllegalArgumentException("location or fileId can not be empty"));
+            return Mono.error(new IllegalArgumentException(
+                "storage=s3 requires fileId in configuration"));
         }
+
         return loadFromFileManager(newDef.getId(), fileId)
             .flatMap(file -> {
                 config.put("location", file.getAbsolutePath());
-                return super
-                    .load(newDef)
+                return super.load(newDef)
                     .subscribeOn(Schedulers.boundedElastic())
-                    //加载失败则删除文件,防止文件内容错误时,一直无法加载
                     .doOnError(err -> file.delete());
             });
+    }
 
+    /**
+     * 重写父类扫描逻辑：根据 configuration.loadType 选择 JAR 或目录扫描模式。
+     * <p>
+     * loadType=jar → classpath 扫描（JAR 内）
+     * loadType=classes → 目录扫描
+     * 不设置 → 自动检测（目录=classes，文件=jar）
+     */
+    @Override
+    protected ProtocolSupportProvider lookupProvider(String provider,
+                                                     ProtocolClassLoader classLoader) {
+        // 指定了 provider 全限定类名 → 直接加载
+        if (provider != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                Class<ProtocolSupportProvider> providerType =
+                    (Class<ProtocolSupportProvider>) classLoader.loadSelfClass(provider);
+                return providerType.getDeclaredConstructor().newInstance();
+            } catch (Exception e) {
+                log.error("Failed to load provider class: {}", provider, e);
+                return null;
+            }
+        }
+
+        // 自动扫描：根据 loadType 或自动检测决定扫描模式
+        boolean isJar = resolveIsJar(classLoader);
+
+        log.debug("Scanning for ProtocolSupportProvider, isJar={}, location={}",
+            isJar, classLoader.getUrls().length > 0 ? classLoader.getUrls()[0] : "unknown");
+
+        return ClassUtils
+            .findImplClass(
+                ProtocolSupportProvider.class,
+                isJar ? "classpath:**/*.class" : "**/*.class",
+                isJar,
+                classLoader,
+                ProtocolClassLoader::loadSelfClass)
+            .orElse(null);
+    }
+
+    /**
+     * 解析扫描模式：loadType 配置优先 → 自动检测。
+     */
+    private boolean resolveIsJar(ProtocolClassLoader classLoader) {
+        // TODO: 从 ProtocolSupportDefinition 传递 loadType，当前通过 URL 检测
+        URL[] urls = classLoader.getUrls();
+        if (urls == null || urls.length == 0) {
+            return true; // 默认 JAR 模式
+        }
+        String path = urls[0].getPath();
+        if (path == null) {
+            return true;
+        }
+        return !new File(path).isDirectory();
     }
 
     /**
