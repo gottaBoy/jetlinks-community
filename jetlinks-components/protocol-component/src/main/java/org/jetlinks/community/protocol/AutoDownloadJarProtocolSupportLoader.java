@@ -181,6 +181,21 @@ public class AutoDownloadJarProtocolSupportLoader extends JarProtocolSupportLoad
 
     }
 
+    /**
+     * Clear cached protocol JAR files for the given protocol ID.
+     * Called before re-loading to ensure S3/TOS updates are picked up.
+     */
+    public void clearCache(String protocolId) {
+        File[] files = tempPath.listFiles((dir, name) -> name.startsWith(protocolId + "_"));
+        if (files != null) {
+            for (File f : files) {
+                if (f.delete()) {
+                    log.info("[ProtocolCache] Deleted cached JAR: {}", f.getName());
+                }
+            }
+        }
+    }
+
     private Mono<File> loadFromFileManager(String protocolId, String fileId) {
         Path path = Paths.get(tempPath.getPath(), (protocolId + "_" + fileId) + ".jar");
 

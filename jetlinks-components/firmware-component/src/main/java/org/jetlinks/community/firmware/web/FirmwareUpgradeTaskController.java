@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Comparator;
 import java.util.List;
 
 @RestController
@@ -56,17 +57,25 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
                         return Mono.just(SaveResult.of(0, 0));
                     }
                     FirmwareUpgradeTaskEntity task = entities.get(0);
-                    // 使用 insert 获取生成 ID 的实体
-                    return getService().insert(Mono.just(task))
-                        .flatMap(saved -> {
-                            List<String> deviceIds = service.extractDeviceIds(saved);
+                    List<String> deviceIds = service.extractDeviceIds(task);
+                    return getService().save(Mono.just(task))
+                        .flatMap(result -> {
                             if (deviceIds.isEmpty()) {
-                                return Mono.just(SaveResult.of(0, 1));
+                                return Mono.just(result);
                             }
-                            saved.setDeviceCount(deviceIds.size());
-                            return getService().updateById(saved.getId(), Mono.just(saved))
-                                .then(service.startTask(saved.getId(), deviceIds))
-                                .thenReturn(SaveResult.of(0, 1));
+                            // save 后通过 firmwareId 查询刚创建的任务（取最新一条）
+                            return getService().createQuery()
+                                .where(FirmwareUpgradeTaskEntity::getFirmwareId, task.getFirmwareId())
+                                .fetch()
+                                .sort(Comparator.comparing(FirmwareUpgradeTaskEntity::getCreateTime).reversed())
+                                .next()
+                                .flatMap(saved -> {
+                                    saved.setDeviceCount(deviceIds.size());
+                                    return getService().updateById(saved.getId(), Mono.just(saved))
+                                        .then(service.startTask(saved.getId(), deviceIds))
+                                        .thenReturn(result);
+                                })
+                                .switchIfEmpty(Mono.just(result));
                         });
                 });
     }

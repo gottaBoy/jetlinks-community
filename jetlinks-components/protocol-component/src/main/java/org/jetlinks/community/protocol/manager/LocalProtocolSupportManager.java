@@ -23,6 +23,7 @@ import org.hswebframework.web.exception.BusinessException;
 import org.hswebframework.web.i18n.LocaleUtils;
 import org.jetlinks.core.ProtocolSupport;
 import org.jetlinks.core.trace.MonoTracer;
+import org.jetlinks.community.protocol.AutoDownloadJarProtocolSupportLoader;
 import org.jetlinks.community.protocol.ProtocolSupportEntity;
 import org.jetlinks.community.reference.DataReferenceManager;
 import org.jetlinks.supports.protocol.StaticProtocolSupports;
@@ -34,6 +35,8 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -110,16 +113,19 @@ public class LocalProtocolSupportManager
         );
     }
 
-    //保存协议前，判断协议是否能正常运行
+    //保存协议后，清除本地缓存并重新加载（确保 S3/TOS 更新生效）
     @EventListener
     public void checkProtocol(EntitySavedEvent<ProtocolSupportEntity> event) {
         event.async(
             Flux.fromIterable(event.getEntity())
-                .flatMap(entity -> init(entity.toDefinition()))
+                .flatMap(entity -> {
+                    clearProtocolCache(entity.getId());
+                    return init(entity.toDefinition());
+                })
         );
     }
 
-    //创建协议前，判断协议是否能正常运行
+    //创建协议后，加载协议（新协议无缓存需清理）
     @EventListener
     public void checkProtocol(EntityCreatedEvent<ProtocolSupportEntity> event) {
         event.async(
@@ -129,13 +135,51 @@ public class LocalProtocolSupportManager
     }
 
 
-    //修改协议前，判断协议是否能正常运行
+    //修改协议后，仅当 JAR 来源变化时清除缓存并重新加载
     @EventListener
-    public void checkProtocol(EntityModifyEvent<ProtocolSupportEntity> event) {
+    public void handleProtocolModify(EntityModifyEvent<ProtocolSupportEntity> event) {
         event.async(
             Flux.fromIterable(event.getAfter())
-                .flatMap(entity -> checkProtocol(entity.toDefinition()))
+                .flatMap(entity -> {
+                    // 对比修改前后：仅当 location / fileId 变化时才重新加载
+                    ProtocolSupportEntity before = event.getBefore()
+                        .stream()
+                        .filter(e -> e.getId().equals(entity.getId()))
+                        .findFirst()
+                        .orElse(null);
+
+                    if (before != null && isJarSourceChanged(before, entity)) {
+                        log.info("[ProtocolReload] JAR source changed for {}, clearing cache and reloading",
+                            entity.getId());
+                        clearProtocolCache(entity.getId());
+                        return init(entity.toDefinition());
+                    }
+                    log.debug("[ProtocolReload] No JAR source change for {}, skipping reload", entity.getId());
+                    return Mono.empty();
+                })
         );
+    }
+
+    /**
+     * Check if the JAR source (location URL or fileId) changed between old and new entity.
+     */
+    private boolean isJarSourceChanged(ProtocolSupportEntity before, ProtocolSupportEntity after) {
+        Map<String, Object> oldCfg = before.getConfiguration();
+        Map<String, Object> newCfg = after.getConfiguration();
+        if (oldCfg == null || newCfg == null) {
+            return !Objects.equals(oldCfg, newCfg);
+        }
+        String oldLocation = Objects.toString(oldCfg.get("location"), "");
+        String newLocation = Objects.toString(newCfg.get("location"), "");
+        String oldFileId = Objects.toString(oldCfg.get("fileId"), "");
+        String newFileId = Objects.toString(newCfg.get("fileId"), "");
+        return !oldLocation.equals(newLocation) || !oldFileId.equals(newFileId);
+    }
+
+    private void clearProtocolCache(String protocolId) {
+        if (loader instanceof AutoDownloadJarProtocolSupportLoader) {
+            ((AutoDownloadJarProtocolSupportLoader) loader).clearCache(protocolId);
+        }
     }
 
 

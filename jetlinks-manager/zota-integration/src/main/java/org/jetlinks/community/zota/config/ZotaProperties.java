@@ -4,6 +4,9 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /**
  * Configuration for zota-server integration.
  * DMF RabbitMQ properties come from spring.rabbitmq.* (shared with zota-server).
@@ -29,4 +32,16 @@ public class ZotaProperties {
 
     /** DMF routing key for OTA events */
     private String dmfRoutingKey = "zota.dmf.#";
+
+    /** zota-repo API base URL for vehicle sync */
+    private String repoApiUrl = "http://localhost:8080";
+
+    /** Vehicle sync configuration */
+    private VehicleSync sync = new VehicleSync();
+
+    @Data
+    public static class VehicleSync {
+        /** Product IDs to sync when device is created (whitelist) */
+        private Set<String> productIds = new HashSet<>();
+    }
 }
