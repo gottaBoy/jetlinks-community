@@ -18,7 +18,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  */
 @Getter
 @Setter
-@ConfigurationProperties("fdc.firmware")
+@ConfigurationProperties("ziot.firmware")
 public class FdcFirmwareProperties {
 
     /** Storage mode: "local" or "s3" */
@@ -28,7 +28,7 @@ public class FdcFirmwareProperties {
     private String storagePath = "./data/fdc-firmware";
 
     /** Download base URL for constructing download links */
-    private String downloadBaseUrl = "/api/fdc/firmware/download";
+    private String downloadBaseUrl = "/api/firmware/download";
 
     /** S3 endpoint (s3 mode only) */
     private String s3Endpoint;

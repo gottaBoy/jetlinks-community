@@ -34,15 +34,15 @@ import java.util.*;
  *
  * <pre>
  * Endpoints:
- *   POST   /api/fdc/firmware/upload     — upload firmware
- *   GET    /api/fdc/firmware/list       — list firmware
- *   GET    /api/fdc/firmware/download/{filename} — download firmware
- *   POST   /api/fdc/ota/upgrade         — trigger OTA
+ *   POST   /api/firmware/upload     — upload firmware
+ *   GET    /api/firmware/list       — list firmware
+ *   GET    /api/firmware/download/{productId}/{filename} — download firmware
+ *   POST   /api/firmware/ota/upgrade         — trigger OTA
  * </pre>
  */
 @Slf4j
 @RestController
-@RequestMapping("/api/fdc")
+@RequestMapping("/api/firmware")
 public class FdcFirmwareController {
 
     private final FdcOtaService otaService;
@@ -69,7 +69,7 @@ public class FdcFirmwareController {
 
     // ── 固件上传 ─────────────────────────────────────────────
 
-    @PostMapping("/firmware/upload")
+    @PostMapping("/upload")
     public Mono<Map<String, Object>> uploadFirmware(
             @RequestParam("file") MultipartFile file,
             @RequestParam("version") String version,
@@ -99,7 +99,7 @@ public class FdcFirmwareController {
                 log.info("[FDC] Firmware uploaded to local: path={}, size={}", filePath, fileSize);
             }
 
-            String fileUrl = "/api/fdc/firmware/download/" + productId + "/" + filename;
+            String fileUrl = "/api/firmware/download/" + productId + "/" + filename;
 
             return Map.<String, Object>of(
                 "filename", filename,
@@ -116,7 +116,7 @@ public class FdcFirmwareController {
 
     // ── 固件列表 ──────────────────────────────────────────────
 
-    @GetMapping("/firmware/list")
+    @GetMapping("/list")
     public Mono<List<Map<String, Object>>> listFirmware(
             @RequestParam(value = "productId", required = false) String productId) {
 
@@ -149,7 +149,7 @@ public class FdcFirmwareController {
                     "filename", f.getName(),
                     "version", extractVersion(f.getName()),
                     "fileSize", f.length(),
-                    "fileUrl", "/api/fdc/firmware/download/" + pid + "/" + f.getName(),
+                    "fileUrl", "/api/firmware/download/" + pid + "/" + f.getName(),
                     "productId", pid,
                     "lastModified", f.lastModified()
                 ));
@@ -178,7 +178,7 @@ public class FdcFirmwareController {
                     "filename", name,
                     "version", extractVersion(name),
                     "fileSize", obj.size(),
-                    "fileUrl", "/api/fdc/firmware/download/" + pid + "/" + name,
+                    "fileUrl", "/api/firmware/download/" + pid + "/" + name,
                     "productId", pid,
                     "lastModified", obj.lastModified().toEpochSecond() * 1000
                 ));
@@ -191,7 +191,7 @@ public class FdcFirmwareController {
 
     // ── 固件下载 ─────────────────────────────────────────────
 
-    @GetMapping("/firmware/download/{productId}/{filename}")
+    @GetMapping("/download/{productId}/{filename}")
     public ResponseEntity<Resource> downloadFirmware(
             @PathVariable String productId,
             @PathVariable String filename) {
