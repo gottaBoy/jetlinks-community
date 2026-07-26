@@ -253,6 +253,8 @@ management:
     health:
         elasticsearch:
             enabled: false
+        rabbit:
+            enabled: false
     elastic:
         metrics:
             export:
@@ -269,9 +271,9 @@ knife4j:
 springdoc:
     openapi:
         info:
-            title: "jetlinks"
-            description: "jetlinks平台API"
-            version: "2.10"
+            title: "ZIOT API"
+            description: "ZIOT平台API"
+            version: "1.0.0"
     api-docs:
         enabled: true
         path: /v3/api-docs
@@ -354,11 +356,11 @@ ziot:
   emqx:
     # EMQX 集群地址（K8s Service 或外部地址）
     host: ${EMQX_HOST:localhost}
-    mqtt-port: ${EMQX_MQTT_PORT:1883}
-    # JetLinks 订阅 EMQX 的 clientId（不要与 FDC 设备冲突）
+    mqtt-port: ${EMQX_PORT:1883}
+    # 订阅 EMQX 的 clientId（不要与 FDC 设备冲突）
     subscriber-client-id: ziot-fdc-gateway
     subscriber-username: admin
-    subscriber-password: ${EMQX_JETLINKS_PASSWORD:admin}
+    subscriber-password: ${EMQX_PASSWORD:admin}
   # 固件包存储（local / s3），FDC 及其他产品通用
   firmware:
     # storage-mode: local  (默认本地) | s3  (对象存储)

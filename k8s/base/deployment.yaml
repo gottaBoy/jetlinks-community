@@ -1,0 +1,63 @@
+# ziot (jetlinks-community) Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ziot
+  labels:
+    app: ziot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ziot
+  template:
+    metadata:
+      labels:
+        app: ziot
+    spec:
+      containers:
+        - name: ziot
+          image: ziot:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8848
+              protocol: TCP
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+            - name: TZ
+              value: "Asia/Shanghai"
+          envFrom:
+            - secretRef:
+                name: ziot-env
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "3Gi"
+              cpu: "2"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8848
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8848
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8848
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /home/ziot/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ziot-data

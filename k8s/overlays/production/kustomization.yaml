@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zota
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+images:
+  - name: ziot
+    newName: harbor.intra.zeron.ai/smartdrive/ziot
+    newTag: 0.0.2
