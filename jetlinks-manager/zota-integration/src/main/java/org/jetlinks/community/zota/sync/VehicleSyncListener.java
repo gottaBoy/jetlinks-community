@@ -14,7 +14,6 @@ import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -108,7 +107,7 @@ public class VehicleSyncListener {
     }
 
     /**
-     * 同步到 zota-server：创建 Target（controllerId = VIN）+ 写入 metadata（车型/智驾类型）
+     * 同步到 zota-server：创建 Target（controllerId = VIN）+ 写入属性（productId/internalCode/vehicleType）
      */
     private Mono<Void> syncToZotaServer(DeviceInstanceEntity device) {
         String mgmtUrl = properties.getMgmtUrl();
@@ -139,55 +138,49 @@ public class VehicleSyncListener {
                 .maxBackoff(Duration.ofSeconds(30))
                 .doBeforeRetry(rs -> log.warn("[VehicleSync] zota-server target retry {} for {}: {}",
                     rs.totalRetries() + 1, device.getId(), rs.failure().getMessage())))
-            // Step 2: write metadata (with retry)
-            .then(writeTargetMetadata(client, auth, device))
+            // Step 2: write attributes (with retry)
+            .then(writeTargetAttributes(client, auth, device))
             .then();
     }
 
     /**
-     * 写入 target metadata：productId 和 internalCode，与 ziot 字段保持一致。
+     * 写入 target attributes：productId、internalCode、vehicleType。
+     * <p>
+     * 写入属性而非元数据，因为 Rollout 的 targetFilterQuery 通过 RSQL
+     * {@code attribute.productId==K_DC_L2} 过滤目标——元数据不支持 RSQL 查询。
      */
-    private Mono<Void> writeTargetMetadata(WebClient client, String auth, DeviceInstanceEntity device) {
-        // metadata format: [{key: "...", value: "..."}, ...]
-        List<Map<String, String>> metadata = new ArrayList<>();
+    private Mono<Void> writeTargetAttributes(WebClient client, String auth, DeviceInstanceEntity device) {
+        // attributes format: {"productId": "K_DC_L2", "internalCode": "ZSD-K001", ...}
+        Map<String, String> attributes = new LinkedHashMap<>();
 
         if (device.getProductId() != null) {
-            Map<String, String> m = new LinkedHashMap<>();
-            m.put("key", "productId");
-            m.put("value", device.getProductId());
-            metadata.add(m);
+            attributes.put("productId", device.getProductId());
         }
         if (device.getInternalCode() != null) {
-            Map<String, String> m = new LinkedHashMap<>();
-            m.put("key", "internalCode");
-            m.put("value", device.getInternalCode());
-            metadata.add(m);
+            attributes.put("internalCode", device.getInternalCode());
         }
         if (device.getProductId() != null) {
-            Map<String, String> m = new LinkedHashMap<>();
-            m.put("key", "vehicleType");
-            m.put("value", device.getProductId());
-            metadata.add(m);
+            attributes.put("vehicleType", device.getProductId());
         }
 
-        if (metadata.isEmpty()) {
-            log.debug("[VehicleSync] No metadata to write for {}", device.getId());
+        if (attributes.isEmpty()) {
+            log.debug("[VehicleSync] No attributes to write for {}", device.getId());
             return Mono.empty();
         }
 
-        log.info("[VehicleSync] Writing metadata for {}: productId={}, internalCode={}, vehicleType={}",
+        log.info("[VehicleSync] Writing attributes for {}: productId={}, internalCode={}, vehicleType={}",
             device.getId(), device.getProductId(), device.getInternalCode(), device.getProductId());
 
-        return client.post()
-            .uri("/rest/v1/targets/{controllerId}/metadata", device.getId())
+        return client.put()
+            .uri("/rest/v1/targets/{controllerId}/attributes", device.getId())
             .header("Authorization", auth)
             .contentType(MediaType.APPLICATION_JSON)
-            .bodyValue(metadata)
+            .bodyValue(attributes)
             .retrieve()
             .toBodilessEntity()
             .retryWhen(Retry.backoff(3, Duration.ofSeconds(2))
                 .maxBackoff(Duration.ofSeconds(30))
-                .doBeforeRetry(rs -> log.warn("[VehicleSync] zota-server metadata retry {} for {}: {}",
+                .doBeforeRetry(rs -> log.warn("[VehicleSync] zota-server attributes retry {} for {}: {}",
                     rs.totalRetries() + 1, device.getId(), rs.failure().getMessage())))
             .then();
     }
