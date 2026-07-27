@@ -9,4 +9,4 @@ resources:
 images:
   - name: ziot
     newName: harbor.intra.zeron.ai/smartdrive/ziot
-    newTag: 0.0.2
+    newTag: 0.0.3

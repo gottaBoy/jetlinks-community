@@ -62,6 +62,7 @@
         <jna.version>5.12.1</jna.version>
         <aliyun.sdk.core>4.5.2</aliyun.sdk.core>
         <jsonata.version>2.4.1</jsonata.version>
+        <awssdk.version>2.27.21</awssdk.version>
         <spring.cloud.version>2024.0.0</spring.cloud.version>
         <spring.cloud.k8s.version>2.1.9</spring.cloud.k8s.version>
         <fst.version>2.57</fst.version>
@@ -939,6 +940,13 @@
                 </exclusions>
             </dependency>
 
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${awssdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
         </dependencies>
     </dependencyManagement>

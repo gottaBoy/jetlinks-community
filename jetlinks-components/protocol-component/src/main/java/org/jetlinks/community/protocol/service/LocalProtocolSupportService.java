@@ -21,6 +21,8 @@ import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.hswebframework.web.crud.service.GenericReactiveCrudService;
 import org.hswebframework.web.exception.BusinessException;
 import org.hswebframework.web.exception.NotFoundException;
+import org.jetlinks.community.io.file.FileInfo;
+import org.jetlinks.community.io.file.FileManager;
 import org.jetlinks.community.protocol.ProtocolInfo;
 import org.jetlinks.community.protocol.ProtocolSupportEntity;
 import org.jetlinks.community.protocol.TransportDetail;
@@ -39,6 +41,8 @@ import reactor.util.function.Tuples;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 @Service
 @Slf4j
@@ -48,6 +52,8 @@ public class LocalProtocolSupportService extends GenericReactiveCrudService<Prot
     private final DataReferenceManager referenceManager;
 
     private final ProtocolSupports protocolSupports;
+
+    private final FileManager fileManager;
 
     @Transactional
     public Mono<Boolean> deploy(String id) {
@@ -137,6 +143,33 @@ public class LocalProtocolSupportService extends GenericReactiveCrudService<Prot
                 .getDefaultMetadata(Transport.of(transport))
                 .flatMap(support.getMetadataCodec()::encode)
             ).defaultIfEmpty("{}");
+    }
+
+    // ═══ S3 存储协议 location 自动补全 ═══
+    // 当 storage=s3 且 fileId 存在但 location 缺失时，通过 FileManager 查出 accessUrl 回填。
+    // 解决旧数据 / 前端未保存 location 导致编辑时文件地址不显示的问题。
+    @Override
+    public Mono<ProtocolSupportEntity> findById(String id) {
+        return super.findById(id).flatMap(this::enrichS3Location);
+    }
+
+    private Mono<ProtocolSupportEntity> enrichS3Location(ProtocolSupportEntity entity) {
+        Map<String, Object> config = entity.getConfiguration();
+        if (config == null) return Mono.just(entity);
+
+        String storage = Objects.toString(config.get("storage"), "");
+        String fileId  = Objects.toString(config.get("fileId"), "");
+        String location = Objects.toString(config.get("location"), "");
+
+        if (!"s3".equals(storage) || fileId.isEmpty() || !location.isEmpty()) {
+            return Mono.just(entity);
+        }
+
+        return fileManager.getFile(fileId)
+            .map(FileInfo::getAccessUrl)
+            .doOnNext(url -> config.put("location", url))
+            .thenReturn(entity)
+            .onErrorResume(err -> Mono.just(entity));
     }
 
 }

@@ -25,6 +25,7 @@ import lombok.Generated;
 import lombok.Getter;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.hswebframework.utils.StringUtils;
+import org.hswebframework.web.api.crud.entity.PagerResult;
 import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.hswebframework.web.authorization.annotation.Authorize;
 import org.hswebframework.web.authorization.annotation.QueryAction;
@@ -34,6 +35,7 @@ import org.hswebframework.web.crud.web.reactive.ReactiveServiceCrudController;
 import org.hswebframework.web.exception.BusinessException;
 import org.jetlinks.community.device.web.request.ProtocolDecodeRequest;
 import org.jetlinks.community.device.web.request.ProtocolEncodeRequest;
+import org.jetlinks.community.io.file.FileInfo;
 import org.jetlinks.community.io.file.FileManager;
 import org.jetlinks.community.protocol.ProtocolDetail;
 import org.jetlinks.community.protocol.ProtocolInfo;
@@ -62,6 +64,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 @RequestMapping("/protocol")
@@ -294,6 +297,50 @@ public class ProtocolSupportController
                 return getService().save(entity);
             })
             .then();
+    }
+
+    // ═══ S3 存储协议 location 自动回填 ═══
+    // 当 storage=s3 且 fileId 存在但 location 缺失时，通过 FileManager 查出 accessUrl 回填。
+    // 解决旧数据 / 前端查询时文件地址不显示的问题。
+
+    @Override
+    public Flux<ProtocolSupportEntity> query(@Parameter(hidden = true) QueryParamEntity query) {
+        return ReactiveServiceCrudController.super.query(query)
+            .flatMap(this::enrichS3Location);
+    }
+
+    @Override
+    public Mono<PagerResult<ProtocolSupportEntity>> queryPager(@Parameter(hidden = true) QueryParamEntity query) {
+        return ReactiveServiceCrudController.super.queryPager(query)
+            .flatMap(pager -> Flux.fromIterable(pager.getData())
+                .flatMap(this::enrichS3Location)
+                .collectList()
+                .map(list -> PagerResult.of(pager.getTotal(), list, query)));
+    }
+
+    private Mono<ProtocolSupportEntity> enrichS3Location(ProtocolSupportEntity entity) {
+        Map<String, Object> config = entity.getConfiguration();
+        if (config == null) return Mono.just(entity);
+
+        String storage  = Objects.toString(config.get("storage"), "");
+        String fileId   = Objects.toString(config.get("fileId"), "");
+        String location = Objects.toString(config.get("location"), "");
+
+        if (!"s3".equals(storage) || fileId.isEmpty() || !location.isEmpty()) {
+            return Mono.just(entity);
+        }
+
+        return fileManager.getFile(fileId)
+            .map(info -> {
+                String url = info.getAccessUrl();
+                if (url == null || url.isEmpty()) {
+                    url = info.getPath();
+                }
+                return url;
+            })
+            .doOnNext(url -> config.put("location", url))
+            .thenReturn(entity)
+            .onErrorResume(err -> Mono.just(entity));
     }
 
 }
