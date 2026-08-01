@@ -99,7 +99,7 @@ public class FdcFirmwareController {
                 log.info("[FDC] Firmware uploaded to local: path={}, size={}", filePath, fileSize);
             }
 
-            String fileUrl = "/api/firmware/download/" + productId + "/" + filename;
+            String fileUrl = props.getDownloadBaseUrl() + "/" + productId + "/" + filename;
 
             return Map.<String, Object>of(
                 "filename", filename,
@@ -149,7 +149,7 @@ public class FdcFirmwareController {
                     "filename", f.getName(),
                     "version", extractVersion(f.getName()),
                     "fileSize", f.length(),
-                    "fileUrl", "/api/firmware/download/" + pid + "/" + f.getName(),
+                    "fileUrl", props.getDownloadBaseUrl() + "/" + pid + "/" + f.getName(),
                     "productId", pid,
                     "lastModified", f.lastModified()
                 ));
@@ -178,7 +178,7 @@ public class FdcFirmwareController {
                     "filename", name,
                     "version", extractVersion(name),
                     "fileSize", obj.size(),
-                    "fileUrl", "/api/firmware/download/" + pid + "/" + name,
+                    "fileUrl", props.getDownloadBaseUrl() + "/" + pid + "/" + name,
                     "productId", pid,
                     "lastModified", obj.lastModified().toEpochSecond() * 1000
                 ));

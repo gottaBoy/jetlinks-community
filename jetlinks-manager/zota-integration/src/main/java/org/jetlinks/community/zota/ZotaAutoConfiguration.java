@@ -2,6 +2,7 @@ package org.jetlinks.community.zota;
 
 import lombok.extern.slf4j.Slf4j;
 import org.jetlinks.community.zota.fdc.FdcFirmwareProperties;
+import org.jetlinks.community.zota.sync.CredentialSyncProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.ComponentScan;
@@ -21,7 +22,7 @@ import javax.annotation.PostConstruct;
 @Slf4j
 @Configuration
 @ComponentScan(basePackages = "org.jetlinks.community.zota")
-@EnableConfigurationProperties(FdcFirmwareProperties.class)
+@EnableConfigurationProperties({FdcFirmwareProperties.class, CredentialSyncProperties.class})
 @ConditionalOnProperty(prefix = "zota", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ZotaAutoConfiguration {
 

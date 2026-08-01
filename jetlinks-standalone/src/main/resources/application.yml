@@ -358,9 +358,9 @@ ziot:
     host: ${EMQX_HOST:localhost}
     mqtt-port: ${EMQX_PORT:1883}
     # 订阅 EMQX 的 clientId（不要与 FDC 设备冲突）
-    subscriber-client-id: ziot-fdc-gateway
-    subscriber-username: admin
-    subscriber-password: ${EMQX_PASSWORD:admin}
+    subscriber-client-id: ${EMQX_CLIENT_ID:admin}
+    subscriber-username: ${EMQX_CLIENT_USERNAME:admin}
+    subscriber-password: ${EMQX_CLIENT_PASSWORD:admin}
   # 固件包存储（local / s3），FDC 及其他产品通用
   firmware:
     # storage-mode: local  (默认本地) | s3  (对象存储)
@@ -375,3 +375,8 @@ ziot:
     s3-secret-key: ${S3_SECRET_KEY:}
     s3-bucket: ${S3_BUCKET:zota}
     s3-prefix: ${S3_PREFIX:firmware}   # S3 key: {productId}/firmware/{filename}
+  # FDC 设备 MQTT 凭证同步到 Redis（供 EMQX Redis 认证使用）
+  sync:
+    product-ids:
+      - "hc_fdc"
+    device-password: ${FDC_DEVICE_PASSWORD:}

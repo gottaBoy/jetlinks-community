@@ -39,6 +39,10 @@ public class FirmwareUpgradeHistoryEntity extends GenericEntity<String> {
     @Schema(description = "产品ID")
     private String productId;
 
+    @Column(length = 128)
+    @Schema(description = "产品名称")
+    private String productName;
+
     @Column(length = 64)
     @Schema(description = "固件ID")
     private String firmwareId;

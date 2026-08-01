@@ -102,19 +102,49 @@ public class FirmwareUpgradeTaskService extends GenericReactiveCrudService<Firmw
     private Mono<Void> dispatchOne(FirmwareUpgradeTaskEntity task,
                                      FirmwareEntity firmware,
                                      String deviceId) {
-        FirmwareUpgradeHistoryEntity history = new FirmwareUpgradeHistoryEntity();
-        history.setTaskId(task.getId());
-        history.setTaskName(task.getName());
-        history.setDeviceId(deviceId);
-        history.setFirmwareId(firmware.getId());
-        history.setFirmwareName(firmware.getName());
-        history.setToVersion(firmware.getVersion());
-        history.setProductId(task.getProductId());
-        history.setStatus("pending");
-        history.setProgress(0);
-        history.setStartTime(System.currentTimeMillis());
+        return deviceRegistry.getDevice(deviceId)
+            .flatMap(device ->
+                device.getMetadata()
+                    .flatMap(devMeta -> {
+                        FirmwareUpgradeHistoryEntity history = new FirmwareUpgradeHistoryEntity();
+                        history.setTaskId(task.getId());
+                        history.setTaskName(task.getName());
+                        history.setDeviceId(deviceId);
+                        history.setDeviceName(devMeta.getName());
+                        history.setFirmwareId(firmware.getId());
+                        history.setFirmwareName(firmware.getName());
+                        history.setToVersion(firmware.getVersion());
+                        history.setProductId(task.getProductId());
+                        history.setStatus("pending");
+                        history.setProgress(0);
+                        history.setStartTime(System.currentTimeMillis());
 
-        return historyService.save(Mono.just(history))
+                        return device.getProduct()
+                            .flatMap(product -> product.getMetadata()
+                                .doOnNext(meta -> history.setProductName(meta.getName()))
+                                .then())
+                            .switchIfEmpty(Mono.empty())
+                            .then(historyService.save(Mono.just(history)))
+                            .then(deviceRegistry.getDevice(deviceId));
+                    })
+            )
+            .switchIfEmpty(Mono.defer(() -> {
+                FirmwareUpgradeHistoryEntity history = new FirmwareUpgradeHistoryEntity();
+                history.setTaskId(task.getId());
+                history.setTaskName(task.getName());
+                history.setDeviceId(deviceId);
+                history.setDeviceName(deviceId);
+                history.setFirmwareId(firmware.getId());
+                history.setFirmwareName(firmware.getName());
+                history.setToVersion(firmware.getVersion());
+                history.setProductId(task.getProductId());
+                history.setStatus("pending");
+                history.setProgress(0);
+                history.setStartTime(System.currentTimeMillis());
+
+                return historyService.save(Mono.just(history))
+                    .then(deviceRegistry.getDevice(deviceId));
+            }))
             .flatMap(h -> deviceRegistry.getDevice(deviceId))
             .flatMap(device -> {
                 Map<String, Object> otaData = new LinkedHashMap<>();

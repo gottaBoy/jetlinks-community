@@ -144,6 +144,9 @@ public class DeviceDetail {
     @Schema(description = "设备描述")
     private String description;
 
+    @Schema(description = "内部编号")
+    private String internalCode;
+
     @Schema(description = "关系信息")
     private List<RelatedInfo> relations;
 
@@ -329,6 +332,7 @@ public class DeviceDetail {
         setState(device.getState());
         setParentId(device.getParentId());
         setDescription(device.getDescribe());
+        setInternalCode(device.getInternalCode());
         if (device.getFeatures() != null) {
             withFeatures(Arrays.asList(device.getFeatures()));
         }
