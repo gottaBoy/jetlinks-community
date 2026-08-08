@@ -1,7 +1,6 @@
 package org.jetlinks.community.zota.fdc;
 
 import io.minio.*;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
@@ -15,8 +14,6 @@ import reactor.core.publisher.Mono;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -37,7 +34,7 @@ import java.util.*;
  *   POST   /api/firmware/upload     — upload firmware
  *   GET    /api/firmware/list       — list firmware
  *   GET    /api/firmware/download/{productId}/{filename} — download firmware
- *   POST   /api/firmware/ota/upgrade         — trigger OTA
+ *   POST   /api/firmware/ota/upgrade — retired; use the generic firmware task API
  * </pre>
  */
 @Slf4j
@@ -45,13 +42,11 @@ import java.util.*;
 @RequestMapping("/api/firmware")
 public class FdcFirmwareController {
 
-    private final FdcOtaService otaService;
     private final FdcFirmwareProperties props;
     private final MinioClient s3Client;
     private final boolean s3Mode;
 
-    public FdcFirmwareController(FdcOtaService otaService, FdcFirmwareProperties props) {
-        this.otaService = otaService;
+    public FdcFirmwareController(FdcFirmwareProperties props) {
         this.props = props;
         this.s3Mode = "s3".equalsIgnoreCase(props.getStorageMode());
         if (s3Mode) {
@@ -235,29 +230,18 @@ public class FdcFirmwareController {
         }
     }
 
-    // ── OTA 升级 ─────────────────────────────────────────────
+    // ── Retired OTA endpoint ─────────────────────────────────
 
     @PostMapping("/ota/upgrade")
-    public Mono<Map<String, Object>> startUpgrade(@RequestBody Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        List<String> deviceIds = (List<String>) request.getOrDefault("deviceIds", Collections.emptyList());
-        String version = (String) request.getOrDefault("version", "");
-        String fileUrl = (String) request.getOrDefault("fileUrl", "");
-        String sha256 = (String) request.getOrDefault("sha256", "");
-        Long fileSize = request.containsKey("fileSize") ? 
-            ((Number) request.get("fileSize")).longValue() : 0L;
-
-        if (deviceIds.isEmpty()) {
-            return Mono.just(Map.of("status", "error", "message", "deviceIds is required"));
-        }
-
-        FdcFirmware fw = new FdcFirmware();
-        fw.setVersion(version);
-        fw.setFileUrl(fileUrl);
-        fw.setFileSize(fileSize);
-        fw.setSha256(sha256);
-
-        return otaService.dispatchBatch(deviceIds, fw);
+    public ResponseEntity<Map<String, Object>> rejectLegacyUpgrade() {
+        return ResponseEntity
+            .status(410)
+            .body(Map.of(
+                "status", "gone",
+                "code", "LEGACY_OTA_ENDPOINT_RETIRED",
+                "message", "Use the generic firmware upgrade task API",
+                "migrateTo", "/firmware/upgrade/task"
+            ));
     }
 
     // ── 工具方法 ──────────────────────────────────────────────

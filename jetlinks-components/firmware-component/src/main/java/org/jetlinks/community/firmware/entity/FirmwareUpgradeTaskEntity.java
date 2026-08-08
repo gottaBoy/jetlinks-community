@@ -16,7 +16,6 @@ import javax.persistence.Column;
 import javax.persistence.Table;
 import java.sql.JDBCType;
 import java.util.List;
-import java.util.Map;
 
 @Getter
 @Setter
@@ -24,6 +23,12 @@ import java.util.Map;
 @Comment("固件升级任务表")
 @EnableEntityEvent
 public class FirmwareUpgradeTaskEntity extends GenericEntity<String> implements RecordCreationEntity {
+
+    @Override
+    @Schema(description = "升级任务ID，格式: TASKyyyyMMddHHmmssSSS-NNN")
+    public String getId() {
+        return super.getId();
+    }
 
     @Column(length = 128, nullable = false)
     @Schema(description = "任务名称")
@@ -54,6 +59,10 @@ public class FirmwareUpgradeTaskEntity extends GenericEntity<String> implements 
     @Schema(description = "响应超时时间(秒)")
     private Integer responseTimeoutSeconds;
 
+    @Column
+    @Schema(description = "状态上报超时时间(秒)")
+    private Integer statusTimeoutSeconds;
+
     @Column(length = 512)
     @Schema(description = "任务说明")
     private String description;
@@ -62,7 +71,7 @@ public class FirmwareUpgradeTaskEntity extends GenericEntity<String> implements 
     @ColumnType(jdbcType = JDBCType.LONGVARCHAR)
     @JsonCodec
     @Schema(description = "设备选择条件(JSON)")
-    private List<Map<String, Object>> terms;
+    private List<Object> terms;
 
     @Column
     @Schema(description = "目标设备数量")
@@ -78,9 +87,24 @@ public class FirmwareUpgradeTaskEntity extends GenericEntity<String> implements 
     @Schema(description = "失败数量")
     private Integer failCount;
 
+    @Column
+    @DefaultValue("0")
+    @Schema(description = "等待下发数量")
+    private Integer queuedCount;
+
+    @Column
+    @DefaultValue("0")
+    @Schema(description = "升级中数量")
+    private Integer runningCount;
+
+    @Column
+    @DefaultValue("0")
+    @Schema(description = "已取消数量")
+    private Integer cancelledCount;
+
     @Column(length = 32)
     @DefaultValue("pending")
-    @Schema(description = "任务状态: pending/running/completed/stopped")
+    @Schema(description = "任务状态: pending/running/stopping/completed/partial_failed/failed/stopped")
     private String status;
 
     @Column(updatable = false)

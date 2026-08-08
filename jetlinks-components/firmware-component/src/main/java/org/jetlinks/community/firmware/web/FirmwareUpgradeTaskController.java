@@ -13,6 +13,7 @@ import org.hswebframework.web.authorization.annotation.Resource;
 import org.hswebframework.web.authorization.annotation.SaveAction;
 import org.hswebframework.web.crud.web.reactive.ReactiveServiceCrudController;
 import org.jetlinks.community.firmware.entity.FirmwareUpgradeHistoryEntity;
+import org.jetlinks.community.firmware.entity.FirmwareUpgradeStatus;
 import org.jetlinks.community.firmware.entity.FirmwareUpgradeTaskEntity;
 import org.jetlinks.community.firmware.service.FirmwareUpgradeHistoryService;
 import org.jetlinks.community.firmware.service.FirmwareUpgradeTaskService;
@@ -21,7 +22,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.Comparator;
+import java.util.Collections;
 import java.util.List;
 
 @RestController
@@ -39,10 +40,6 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
     @Autowired
     private FirmwareUpgradeHistoryService historyService;
 
-    /**
-     * 创建升级任务（显式 POST，因接口默认 @PostMapping 与自定义 @PostMapping 冲突导致未注册）
-     * 如果提供了设备选择条件 (terms)，自动提取设备ID并启动下发。
-     */
     @PostMapping("/task")
     @SaveAction
     @Operation(summary = "创建升级任务")
@@ -56,27 +53,10 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
                     if (entities.isEmpty()) {
                         return Mono.just(SaveResult.of(0, 0));
                     }
-                    FirmwareUpgradeTaskEntity task = entities.get(0);
-                    List<String> deviceIds = service.extractDeviceIds(task);
-                    return getService().save(Mono.just(task))
-                        .flatMap(result -> {
-                            if (deviceIds.isEmpty()) {
-                                return Mono.just(result);
-                            }
-                            // save 后通过 firmwareId 查询刚创建的任务（取最新一条）
-                            return getService().createQuery()
-                                .where(FirmwareUpgradeTaskEntity::getFirmwareId, task.getFirmwareId())
-                                .fetch()
-                                .sort(Comparator.comparing(FirmwareUpgradeTaskEntity::getCreateTime).reversed())
-                                .next()
-                                .flatMap(saved -> {
-                                    saved.setDeviceCount(deviceIds.size());
-                                    return getService().updateById(saved.getId(), Mono.just(saved))
-                                        .then(service.startTask(saved.getId(), deviceIds))
-                                        .thenReturn(result);
-                                })
-                                .switchIfEmpty(Mono.just(result));
-                        });
+                    if (entities.size() > 1) {
+                        return Mono.error(new IllegalArgumentException("每次只能创建一个升级任务"));
+                    }
+                    return service.createTask(entities.get(0));
                 });
     }
 
@@ -101,7 +81,14 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
     @SaveAction
     @Operation(summary = "删除升级任务")
     public Mono<Integer> deleteTask(@PathVariable String id) {
-        return getService().deleteById(reactor.core.publisher.Mono.just(id));
+        return historyService
+            .createQuery()
+            .where(FirmwareUpgradeHistoryEntity::getTaskId, id)
+            .fetch()
+            .any(history -> !FirmwareUpgradeStatus.isTerminal(history.getStatus()))
+            .flatMap(active -> active
+                ? Mono.error(new IllegalStateException("任务存在进行中的设备升级，不能删除"))
+                : getService().deleteById(Mono.just(id)));
     }
 
     @PostMapping("/task/{id}/_start")
@@ -118,18 +105,34 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
         return service.stopTask(id, deviceIds);
     }
 
-    @PostMapping("/task/_start")
+    @PostMapping("/task/{id}/devices/_retry")
     @SaveAction
-    @Operation(summary = "批量启动升级任务")
-    public Mono<Void> batchStartTask(@RequestBody List<String> deviceIds) {
-        return service.startTask(deviceIds.get(0), deviceIds);
+    @Operation(summary = "重试任务中的指定设备")
+    public Mono<Void> retryDevices(@PathVariable String id,
+                                   @RequestBody(required = false) List<String> deviceIds) {
+        return service.startTask(id, deviceIds == null ? Collections.emptyList() : deviceIds);
     }
 
-    @PostMapping("/task/_stop")
+    @PostMapping("/task/{id}/devices/_cancel")
     @SaveAction
-    @Operation(summary = "批量停止升级任务")
-    public Mono<Void> batchStopTask(@RequestBody List<String> deviceIds) {
-        return service.stopTask(deviceIds.get(0), deviceIds);
+    @Operation(summary = "取消任务中尚未下发的指定设备")
+    public Mono<Void> cancelDevices(@PathVariable String id,
+                                    @RequestBody(required = false) List<String> deviceIds) {
+        return service.stopTask(id, deviceIds == null ? Collections.emptyList() : deviceIds);
+    }
+
+    @PostMapping("/history/{id}/_retry")
+    @SaveAction
+    @Operation(summary = "重试单条设备升级记录")
+    public Mono<Void> retryHistory(@PathVariable String id) {
+        return service.retryHistory(id);
+    }
+
+    @PostMapping("/history/{id}/_cancel")
+    @SaveAction
+    @Operation(summary = "取消单条尚未下发的设备升级记录")
+    public Mono<Void> cancelHistory(@PathVariable String id) {
+        return service.cancelHistory(id);
     }
 
     /**
@@ -162,7 +165,12 @@ public class FirmwareUpgradeTaskController implements ReactiveServiceCrudControl
     @SaveAction
     @Operation(summary = "删除升级历史记录")
     public Mono<Integer> deleteHistory(@PathVariable String id) {
-        return historyService.deleteById(Mono.just(id));
+        return historyService
+            .findById(id)
+            .flatMap(history -> FirmwareUpgradeStatus.isTerminal(history.getStatus())
+                ? historyService.deleteById(Mono.just(id))
+                : Mono.error(new IllegalStateException("进行中的升级记录不能删除")))
+            .defaultIfEmpty(0);
     }
 
     /**

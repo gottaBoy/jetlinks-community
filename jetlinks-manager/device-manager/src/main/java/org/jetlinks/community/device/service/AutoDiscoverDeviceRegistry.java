@@ -54,9 +54,18 @@ public class AutoDiscoverDeviceRegistry implements DeviceRegistry {
             .switchIfEmpty(Mono.defer(() -> deviceRepository
                 .findById(deviceId)
                 .filter(instance -> instance.getState() != DeviceState.notActive)
-                .flatMap(instance -> parent.register(instance.toDeviceInfo())))
+                .flatMap(this::registerDeviceAfterProduct))
             )
         );
+    }
+
+    private Mono<DeviceOperator> registerDeviceAfterProduct(DeviceInstanceEntity instance) {
+        String productId = instance.getProductId();
+        if (!StringUtils.hasText(productId)) {
+            return parent.register(instance.toDeviceInfo());
+        }
+        return getProduct(productId)
+            .flatMap(ignore -> parent.register(instance.toDeviceInfo()));
     }
 
     @Override

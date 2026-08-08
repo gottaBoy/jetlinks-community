@@ -169,7 +169,19 @@ public class DeviceDetail {
     @Schema(description = "产品所属品类名称")
     private String classifiedName;
 
+    @Schema(description = "设备当前实际运行的固件信息")
+    private FirmwareInfo firmwareInfo;
 
+    @Getter
+    public static class FirmwareInfo {
+
+        @Schema(description = "固件版本")
+        private final String version;
+
+        public FirmwareInfo(String version) {
+            this.version = version;
+        }
+    }
 
     public DeviceDetail notActive() {
 
@@ -353,6 +365,12 @@ public class DeviceDetail {
                 setAloneConfiguration(true);
             }
             configuration.putAll(device.getConfiguration());
+            Object firmwareVersion = Optional
+                .ofNullable(device.getConfiguration().get("firmwareVersion"))
+                .orElse(device.getConfiguration().get("fwVersion"));
+            if (firmwareVersion != null && StringUtils.hasText(String.valueOf(firmwareVersion))) {
+                setFirmwareInfo(new FirmwareInfo(String.valueOf(firmwareVersion)));
+            }
         }
         if (StringUtils.hasText(device.getDeriveMetadata())) {
             mergeDeviceMetadata(device.getDeriveMetadata());
