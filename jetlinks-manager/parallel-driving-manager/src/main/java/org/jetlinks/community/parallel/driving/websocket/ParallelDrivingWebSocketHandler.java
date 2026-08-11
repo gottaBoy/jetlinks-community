@@ -17,7 +17,9 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
+import reactor.core.publisher.Sinks;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.time.Duration;
@@ -221,21 +223,34 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
         private final String vehicleId;
         @SuppressWarnings("unused")
         private final String cockpitId;
-        private final reactor.core.publisher.Sinks.Many<Map<String, Object>> statusSink;
+        private final Sinks.Many<Map<String, Object>> statusSink;
         private final Flux<Map<String, Object>> statusFlux;
+        private final Map<String, Object> latestProperties = new HashMap<>();
         
         public WebSocketSessionInfo(String sessionId, String vehicleId, String cockpitId) {
             this.sessionId = sessionId;
             this.vehicleId = vehicleId;
             this.cockpitId = cockpitId;
             // 对 100ms 高频状态：只保留最新，避免无界 buffer 占用内存
-            this.statusSink = reactor.core.publisher.Sinks.many().multicast().directBestEffort();
+            this.statusSink = Sinks.many().replay().latest();
             // 降频推送：默认 200ms 推一次最新状态（前端更稳，网络更省）
             this.statusFlux = statusSink.asFlux().sample(Duration.ofMillis(200));
         }
         
-        public void addStatus(Map<String, Object> status) {
-            statusSink.tryEmitNext(status);
+        public synchronized void addStatus(Map<String, Object> status) {
+            Object properties = status.get("properties");
+            if (properties instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> propertyMap = (Map<String, Object>) properties;
+                latestProperties.putAll(propertyMap);
+            }
+
+            Map<String, Object> snapshot = new HashMap<>(status);
+            snapshot.put("properties", new HashMap<>(latestProperties));
+            Sinks.EmitResult result = statusSink.tryEmitNext(snapshot);
+            if (result.isFailure()) {
+                log.debug("WebSocket 状态入队失败: sessionId={}, result={}", sessionId, result);
+            }
         }
         
         public Flux<Map<String, Object>> getStatusFlux() {
