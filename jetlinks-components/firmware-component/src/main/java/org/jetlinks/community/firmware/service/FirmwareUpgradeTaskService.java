@@ -495,7 +495,8 @@ public class FirmwareUpgradeTaskService extends GenericReactiveCrudService<Firmw
                 otaData.put("firmwareId", firmware.getId());
                 otaData.put("attempt", history.getAttempt());
                 otaData.put("fwVersion", firmware.getVersion());
-                otaData.put("fwUrl", firmware.getUrl());
+                otaData.put("fwName", firmware.getName() != null ? firmware.getName() : "");
+                otaData.put("fwUrl", firmwareService.resolveDownloadUrl(firmware.getUrl()));
                 otaData.put("fwSize", firmware.getSize() != null ? firmware.getSize() : 0);
                 if ("sha256".equalsIgnoreCase(firmware.getSignMethod())) {
                     otaData.put("fwSha256", firmware.getSign() != null ? firmware.getSign() : "");
@@ -758,7 +759,7 @@ public class FirmwareUpgradeTaskService extends GenericReactiveCrudService<Firmw
                                           PullAssignment assignment) {
         RequestFirmwareMessageReply reply = request.newReply();
         reply.success();
-        reply.setUrl(assignment.firmware.getUrl());
+        reply.setUrl(firmwareService.resolveDownloadUrl(assignment.firmware.getUrl()));
         reply.setVersion(assignment.firmware.getVersion());
         reply.setSign(assignment.firmware.getSign());
         reply.setSignMethod(assignment.firmware.getSignMethod());
@@ -773,6 +774,7 @@ public class FirmwareUpgradeTaskService extends GenericReactiveCrudService<Firmw
         parameters.put("taskId", assignment.task.getId());
         parameters.put("historyId", assignment.history.getId());
         parameters.put("firmwareId", assignment.firmware.getId());
+        parameters.put("fwName", assignment.firmware.getName() != null ? assignment.firmware.getName() : "");
         parameters.put("attempt", assignment.history.getAttempt());
         parameters.put("force", false);
         parameters.put(

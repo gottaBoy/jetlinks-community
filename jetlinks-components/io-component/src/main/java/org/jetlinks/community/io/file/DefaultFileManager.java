@@ -315,6 +315,9 @@ public class DefaultFileManager implements FileManager {
     }
 
     private Mono<String> getApiBasePath() {
+        if (StringUtils.isNotBlank(fileProperties.getAccessBaseUrl())) {
+            return Mono.just(fileProperties.getAccessBaseUrl());
+        }
         return configManager
             .getProperties(API_PATH_CONFIG_NAME)
             .mapNotNull(val -> val.getString(API_PATH_CONFIG_KEY, null));

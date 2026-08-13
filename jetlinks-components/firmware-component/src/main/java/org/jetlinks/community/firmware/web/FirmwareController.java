@@ -40,6 +40,7 @@ public class FirmwareController implements ReactiveServiceCrudController<Firmwar
     @Operation(summary = "下载固件文件（返回文件URL，由前端/设备直接下载）")
     public Mono<String> download(@PathVariable String id) {
         return service.findById(id)
-            .map(FirmwareEntity::getUrl);
+            .map(FirmwareEntity::getUrl)
+            .map(service::resolveDownloadUrl);
     }
 }

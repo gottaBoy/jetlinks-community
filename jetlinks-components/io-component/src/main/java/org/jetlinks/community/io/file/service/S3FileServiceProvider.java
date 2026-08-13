@@ -1,6 +1,7 @@
 package org.jetlinks.community.io.file.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.jetlinks.community.io.file.DefaultReaderContext;
 import org.jetlinks.community.io.file.FileInfo;
 import org.jetlinks.community.io.file.FileManager;
 import org.jetlinks.community.io.file.FileOption;
@@ -9,18 +10,17 @@ import org.jetlinks.community.io.file.info.UploadResponse;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.security.MessageDigest;
 import java.util.function.Function;
@@ -123,12 +123,52 @@ public class S3FileServiceProvider implements FileServiceProvider {
         if (key == null || key.isEmpty()) {
             return Flux.error(new IllegalArgumentException("FileInfo.path is required for S3 read"));
         }
-        return Mono.fromCallable(() -> doRead(key))
-            .subscribeOn(Schedulers.boundedElastic())
-            .flatMapMany(bytes -> {
-                var factory = new org.springframework.core.io.buffer.DefaultDataBufferFactory();
-                return Flux.just(factory.wrap(bytes));
+        return Mono
+            .just(info)
+            .filter(i -> i.getLength() > 0)
+            //未获取到文件长度时通过headObject获取
+            .switchIfEmpty(Mono
+                .fromCallable(() -> {
+                    long length = client
+                        .headObject(HeadObjectRequest.builder()
+                            .bucket(props.getBucket())
+                            .key(key)
+                            .build())
+                        .contentLength();
+                    info.setLength(length);
+                    return info;
+                })
+                .subscribeOn(Schedulers.boundedElastic()))
+            .flatMapMany(i -> {
+                DefaultReaderContext context = new DefaultReaderContext(i, 0, i.getLength());
+                //回调中完成鉴权并设置响应头(Content-Disposition文件名、Content-MD5等),可能修改position/length实现Range下载
+                return callback
+                    .apply(context)
+                    .thenMany(Flux.defer(() -> doReadStream(key, context)));
             });
+    }
+
+    private Flux<DataBuffer> doReadStream(String key, DefaultReaderContext context) {
+        long position = context.getPosition();
+        long length = context.getLength();
+        if (length <= 0) {
+            return Flux.empty();
+        }
+        long totalLength = context.getInfo().getLength();
+        return DataBufferUtils
+            .readInputStream(
+                () -> {
+                    GetObjectRequest.Builder request = GetObjectRequest.builder()
+                        .bucket(props.getBucket())
+                        .key(key);
+                    if (position > 0 || length < totalLength) {
+                        request.range("bytes=" + position + "-" + (position + length - 1));
+                    }
+                    return client.getObject(request.build());
+                },
+                new DefaultDataBufferFactory(),
+                64 * 1024)
+            .subscribeOn(Schedulers.boundedElastic());
     }
 
     @Override
@@ -172,18 +212,4 @@ public class S3FileServiceProvider implements FileServiceProvider {
         }
     }
 
-    private byte[] doRead(String key) throws Exception {
-        try (ResponseInputStream<GetObjectResponse> resp = client.getObject(GetObjectRequest.builder()
-                .bucket(props.getBucket())
-                .key(key)
-                .build());
-             ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = resp.read(buf)) != -1) {
-                bos.write(buf, 0, n);
-            }
-            return bos.toByteArray();
-        }
-    }
 }
