@@ -171,6 +171,13 @@ public class ParallelDrivingMessageRouter {
                     }
                 })
                 .flatMap(msg -> {
+                    // 方向过滤：带 sourceType=cockpit 头的是驾驶舱→车辆下行转发帧，
+                    // 不应作为车辆上行处理，跳过以避免下行控制帧自消费触发"未找到激活房间"。
+                    if ("cockpit".equals(msg.getHeader("sourceType").map(String::valueOf).orElse(null))) {
+                        log.debug("[车辆->云端] 跳过下行转发帧（方向过滤）: deviceId={}, messageId={}",
+                            msg.getDeviceId(), msg.getMessageId());
+                        return Mono.<Void>empty();
+                    }
                     // 车云 RTT：车端上行 INVOKE_FUNCTION cloudLinkPing，平台立即回 FunctionInvokeMessageReply（与 MQTT/TCP 业务链路一致）
                     if (msg instanceof FunctionInvokeMessage) {
                         FunctionInvokeMessage inv = (FunctionInvokeMessage) msg;
