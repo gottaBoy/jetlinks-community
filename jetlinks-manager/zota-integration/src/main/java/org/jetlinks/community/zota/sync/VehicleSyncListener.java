@@ -1,5 +1,7 @@
 package org.jetlinks.community.zota.sync;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.web.crud.events.EntityCreatedEvent;
@@ -7,6 +9,7 @@ import org.hswebframework.web.crud.events.EntitySavedEvent;
 import org.jetlinks.community.device.entity.DeviceInstanceEntity;
 import org.jetlinks.community.zota.config.ZotaProperties;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -27,6 +30,9 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class VehicleSyncListener {
+
+    /** 未获取到 TargetType 时创建 target 不带 type 的哨兵值 */
+    private static final long NO_TARGET_TYPE = -1L;
 
     private final ZotaProperties properties;
 
@@ -107,7 +113,8 @@ public class VehicleSyncListener {
     }
 
     /**
-     * 同步到 zota-server：创建 Target（controllerId = VIN）+ 写入属性（productId/internalCode/vehicleType）
+     * 同步到 zota-server：尽力确保产品 ID 对应 TargetType 存在（best-effort，失败降级为不带 type）
+     * → 创建 Target（controllerId = VIN）→ 写入属性（productId/internalCode/vehicleType）。
      */
     private Mono<Void> syncToZotaServer(DeviceInstanceEntity device) {
         String mgmtUrl = properties.getMgmtUrl();
@@ -119,14 +126,33 @@ public class VehicleSyncListener {
         String auth = "Basic " + Base64.getEncoder().encodeToString(
             (properties.getMgmtUsername() + ":" + properties.getMgmtPassword()).getBytes());
 
+        WebClient client = WebClient.create(mgmtUrl);
+
+        // Step 1: 尽力确保 TargetType（name = productId）存在；失败则降级为不带 type
+        return ensureTargetType(client, auth, device.getProductId())
+            .onErrorResume(err -> {
+                log.warn("[VehicleSync] TargetType 获取失败，降级为不带 type 创建 target: productId={}, error={}",
+                    device.getProductId(), err.getMessage());
+                return Mono.empty();
+            })
+            .defaultIfEmpty(NO_TARGET_TYPE)
+            // Step 2: create target（type 可用则带，不可用则不带）
+            .flatMap(targetTypeId -> createTarget(client, auth, device,
+                targetTypeId != null && targetTypeId > 0 ? targetTypeId : null))
+            // Step 3: write attributes (with retry)
+            .then(writeTargetAttributes(client, auth, device));
+    }
+
+    /** 创建 Target；targetTypeId 为 null 时不设置 type。 */
+    private Mono<Void> createTarget(WebClient client, String auth, DeviceInstanceEntity device, Long targetTypeId) {
         Map<String, Object> target = new LinkedHashMap<>();
         target.put("controllerId", device.getId());
         target.put("name", device.getInternalCode() != null ? device.getInternalCode() : device.getName());
         target.put("description", (device.getProductName() != null ? device.getProductName() : ""));
+        if (targetTypeId != null) {
+            target.put("targetType", targetTypeId);
+        }
 
-        WebClient client = WebClient.create(mgmtUrl);
-
-        // Step 1: create target (with retry)
         return client.post()
             .uri("/rest/v1/targets")
             .header("Authorization", auth)
@@ -138,9 +164,77 @@ public class VehicleSyncListener {
                 .maxBackoff(Duration.ofSeconds(30))
                 .doBeforeRetry(rs -> log.warn("[VehicleSync] zota-server target retry {} for {}: {}",
                     rs.totalRetries() + 1, device.getId(), rs.failure().getMessage())))
-            // Step 2: write attributes (with retry)
-            .then(writeTargetAttributes(client, auth, device))
             .then();
+    }
+
+    /**
+     * 幂等获取（必要时创建）产品 ID 对应的 TargetType，返回其数字 ID。已存在同名类型则不重复创建。
+     */
+    private Mono<Long> ensureTargetType(WebClient client, String auth, String productId) {
+        return findTargetTypeId(client, auth, productId)
+            .switchIfEmpty(Mono.defer(() -> createTargetType(client, auth, productId)))
+            // 并发下可能已被其他请求创建（409），降级为再查一次
+            .onErrorResume(err -> findTargetTypeId(client, auth, productId)
+                .switchIfEmpty(Mono.error(err)));
+    }
+
+    /** GET /rest/v1/targettypes?q=name=={productId}，命中返回 ID，未命中返回 empty。 */
+    private Mono<Long> findTargetTypeId(WebClient client, String auth, String productId) {
+        return client.get()
+            .uri(uriBuilder -> uriBuilder.path("/rest/v1/targettypes")
+                .queryParam("q", "name==" + productId)
+                .build())
+            .header("Authorization", auth)
+            .accept(MediaType.APPLICATION_JSON)
+            .retrieve()
+            .bodyToMono(TargetTypeListResponse.class)
+            .flatMap(resp -> {
+                if (resp.getContent() != null && !resp.getContent().isEmpty()
+                    && resp.getContent().get(0).getId() != null) {
+                    Long id = resp.getContent().get(0).getId();
+                    log.info("[VehicleSync] TargetType 已存在: name={}, id={}", productId, id);
+                    return Mono.just(id);
+                }
+                return Mono.empty();
+            });
+    }
+
+    /** POST /rest/v1/targettypes 创建 TargetType（name = productId），返回新 ID。 */
+    private Mono<Long> createTargetType(WebClient client, String auth, String productId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("name", productId);
+        body.put("description", productId);
+
+        log.info("[VehicleSync] 创建 TargetType: name={}", productId);
+
+        return client.post()
+            .uri("/rest/v1/targettypes")
+            .header("Authorization", auth)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(List.of(body))
+            .retrieve()
+            .bodyToMono(new ParameterizedTypeReference<List<TargetTypeItem>>() {})
+            .flatMap(list -> {
+                if (list != null && !list.isEmpty() && list.get(0).getId() != null) {
+                    Long id = list.get(0).getId();
+                    log.info("[VehicleSync] TargetType 创建成功: name={}, id={}", productId, id);
+                    return Mono.just(id);
+                }
+                return Mono.error(new IllegalStateException("创建 TargetType 未返回 id: name=" + productId));
+            });
+    }
+
+    @Data
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class TargetTypeListResponse {
+        private List<TargetTypeItem> content;
+    }
+
+    @Data
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class TargetTypeItem {
+        private Long id;
+        private String name;
     }
 
     /**
