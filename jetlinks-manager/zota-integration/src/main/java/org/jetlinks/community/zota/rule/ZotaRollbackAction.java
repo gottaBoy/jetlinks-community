@@ -8,6 +8,7 @@ import org.jetlinks.rule.engine.api.task.ExecutionContext;
 import org.jetlinks.rule.engine.api.task.TaskExecutor;
 import org.jetlinks.rule.engine.api.task.TaskExecutorProvider;
 import org.jetlinks.rule.engine.defaults.AbstractTaskExecutor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
@@ -23,6 +24,7 @@ import reactor.core.publisher.Mono;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "zota", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
 public class ZotaRollbackAction implements TaskExecutorProvider {
 

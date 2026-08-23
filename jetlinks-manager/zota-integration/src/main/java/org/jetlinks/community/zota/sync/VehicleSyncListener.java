@@ -8,6 +8,7 @@ import org.hswebframework.web.crud.events.EntityCreatedEvent;
 import org.hswebframework.web.crud.events.EntitySavedEvent;
 import org.jetlinks.community.device.entity.DeviceInstanceEntity;
 import org.jetlinks.community.zota.config.ZotaProperties;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
@@ -28,6 +29,7 @@ import java.util.Map;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "zota", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
 public class VehicleSyncListener {
 
@@ -238,10 +240,10 @@ public class VehicleSyncListener {
     }
 
     /**
-     * 写入 target attributes：productId、internalCode、vehicleType。
+     * 写入 target attributes：productId、internalCode、vehicleType（作为展示/兼容数据）。
      * <p>
-     * 写入属性而非元数据，因为 Rollout 的 targetFilterQuery 通过 RSQL
-     * {@code attribute.productId==K_DC_L2} 过滤目标——元数据不支持 RSQL 查询。
+     * 注意：Rollout 按产品过滤已统一改为 {@code targettype.name==productId}（车端 configData
+     * replace 会清空 attributes，attribute.productId 不可靠）；这些属性仅作展示用途。
      */
     private Mono<Void> writeTargetAttributes(WebClient client, String auth, DeviceInstanceEntity device) {
         // attributes format: {"productId": "K_DC_L2", "internalCode": "ZSD-K001", ...}

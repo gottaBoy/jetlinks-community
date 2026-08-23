@@ -3,6 +3,7 @@ package org.jetlinks.community.parallel.driving.room;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import lombok.extern.slf4j.Slf4j;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.service.ParallelDrivingEncryptionService;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
@@ -32,6 +33,8 @@ public class ParallelDrivingRoomManager {
     private final ParallelDrivingEncryptionService encryptionService;
     private final ReactiveRedisTemplate<Object, Object> redis;
     private final String nodeId;
+    private final boolean latestOnlyEnabled;
+    private final ParallelDrivingLatencyMetrics latencyMetrics;
 
     /** L1 local cache: roomKey → Room object (only for rooms owned by this node) */
     private final ConcurrentHashMap<String, ParallelDrivingRoom> localRooms = new ConcurrentHashMap<>();
@@ -44,12 +47,16 @@ public class ParallelDrivingRoomManager {
     public ParallelDrivingRoomManager(DeviceRegistry deviceRegistry,
                                       ParallelDrivingEncryptionService encryptionService,
                                       ReactiveRedisTemplate<Object, Object> redis,
-                                      @Value("${jetlinks.server-id:standalone}") String nodeId) {
+                                      ParallelDrivingLatencyMetrics latencyMetrics,
+                                      @Value("${jetlinks.server-id:standalone}") String nodeId,
+                                      @Value("${parallel-driving.control.latest-only:false}") boolean latestOnlyEnabled) {
         this.deviceRegistry = deviceRegistry;
         this.encryptionService = encryptionService;
         this.redis = redis;
+        this.latencyMetrics = latencyMetrics;
         this.nodeId = nodeId;
-        log.info("ParallelDrivingRoomManager initialized: nodeId={}", nodeId);
+        this.latestOnlyEnabled = latestOnlyEnabled;
+        log.info("ParallelDrivingRoomManager initialized: nodeId={}, latestOnlyEnabled={}", nodeId, latestOnlyEnabled);
     }
 
     public Mono<ParallelDrivingRoom> createRoom(String cockpitId, String vehicleId) {
@@ -73,6 +80,8 @@ public class ParallelDrivingRoomManager {
                     room.initialize(cockpit, vehicle);
                     room.setEncryptionService(encryptionService);
                     room.setDeviceRegistry(deviceRegistry);
+                    room.setLatestOnlyEnabled(latestOnlyEnabled);
+                    room.setLatencyMetrics(latencyMetrics);
 
                     JSONObject roomInfo = new JSONObject();
                     roomInfo.put("cockpitId", cockpitId);
@@ -211,6 +220,8 @@ public class ParallelDrivingRoomManager {
                     room.initialize(tuple.getT1(), tuple.getT2());
                     room.setEncryptionService(encryptionService);
                     room.setDeviceRegistry(deviceRegistry);
+                    room.setLatestOnlyEnabled(latestOnlyEnabled);
+                    room.setLatencyMetrics(latencyMetrics);
 
                     info.put("nodeId", nodeId);
                     return redis.opsForValue().set(ROOM_INFO_PREFIX + roomKey, info.toJSONString(), REDIS_TTL)

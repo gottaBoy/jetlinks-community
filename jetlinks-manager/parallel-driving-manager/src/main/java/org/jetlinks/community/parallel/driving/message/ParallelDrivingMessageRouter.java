@@ -1,5 +1,6 @@
 package org.jetlinks.community.parallel.driving.message;
 
+import com.alibaba.fastjson.JSON;
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.web.authorization.exception.AccessDenyException;
 import org.jetlinks.community.parallel.driving.configuration.ParallelDrivingVehicleToCockpitProperties;
@@ -12,6 +13,7 @@ import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.core.message.function.FunctionInvokeMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import reactor.core.Disposable;
@@ -43,6 +45,15 @@ public class ParallelDrivingMessageRouter {
     /** remotejoystick 专用调度器：32 线程、10 万队列，与默认 boundedElastic 隔离，支撑 10Hz+ 高频转发 */
     private static final Scheduler REMOTE_JOYSTICK_SCHEDULER = Schedulers.newBoundedElastic(
         32, 100_000, "remotejoystick", 60);
+
+    /** remotejoystick 重复帧去重开关（parallel-driving.control.dedup，默认 false） */
+    @Value("${parallel-driving.control.dedup:false}")
+    private boolean remoteJoystickDedupEnabled = false;
+
+    /** remotejoystick 重复样本去重：(cockpitId, 源timestamp, 控制值指纹) → 命中时间 */
+    private final ConcurrentHashMap<String, Long> processedJoystickSamples = new ConcurrentHashMap<>();
+    private static final long JOYSTICK_DEDUP_TTL_MS = 2000;
+    private static final int JOYSTICK_DEDUP_MAX_SIZE = 10000;
 
     @Autowired
     public ParallelDrivingMessageRouter(ParallelDrivingRelationService relationService,
@@ -121,6 +132,11 @@ public class ParallelDrivingMessageRouter {
                     boolean isEmergencyStop = msg instanceof FunctionInvokeMessage
                         && "emergencystop".equals(((FunctionInvokeMessage) msg).getFunctionId());
                     if (isRemoteJoystick) {
+                        if (remoteJoystickDedupEnabled && isDuplicateRemoteJoystick((FunctionInvokeMessage) msg)) {
+                            log.debug("[驾驶舱->云端] 跳过重复 remotejoystick 帧: deviceId={}, timestamp={}",
+                                msg.getDeviceId(), getStringInputOrHeader((FunctionInvokeMessage) msg, "timestamp"));
+                            return Mono.empty();
+                        }
                         // remotejoystick 专用高并发流：独立调度器，避免与协议层 boundedElastic 竞争
                         return customMessageHandler.handleCustomMessage(msg)
                             .subscribeOn(REMOTE_JOYSTICK_SCHEDULER)
@@ -158,14 +174,14 @@ public class ParallelDrivingMessageRouter {
                     String messageTypeHeader = msg.getHeader("messageType")
                         .map(String::valueOf)
                         .orElse("null");
-                    log.info("[车辆->云端] ParallelDrivingMessageRouter 收到车端消息: deviceId={}, messageType={}, messageId={}, isCustomProtocol={}, messageTypeHeader={}", 
+                    log.debug("[车辆->云端] ParallelDrivingMessageRouter 收到车端消息: deviceId={}, messageType={}, messageId={}, isCustomProtocol={}, messageTypeHeader={}", 
                         msg.getDeviceId(), msg.getMessageType(), msg.getMessageId(), isCustomProtocol, messageTypeHeader);
                     
                     // 如果是 FunctionInvokeMessageReply，记录详细信息
                     if (msg instanceof org.jetlinks.core.message.function.FunctionInvokeMessageReply) {
                         org.jetlinks.core.message.function.FunctionInvokeMessageReply reply = 
                             (org.jetlinks.core.message.function.FunctionInvokeMessageReply) msg;
-                        log.info("[车辆->云端] ParallelDrivingMessageRouter 收到车端 FunctionInvokeMessageReply: functionId={}, success={}, requestId={}", 
+                        log.debug("[车辆->云端] ParallelDrivingMessageRouter 收到车端 FunctionInvokeMessageReply: functionId={}, success={}, requestId={}", 
                             reply.getFunctionId(), reply.isSuccess(), 
                             reply.getHeader("requestMessageId").or(() -> reply.getHeader("requestId")).map(String::valueOf).orElse("null"));
                     }
@@ -197,7 +213,7 @@ public class ParallelDrivingMessageRouter {
                         .map(v -> Boolean.parseBoolean(String.valueOf(v)))
                         .orElse(false);
                     
-                    log.info("[车辆->云端] ParallelDrivingMessageRouter 处理车端消息: deviceId={}, messageType={}, isCustomProtocol={}, messageId={}", 
+                    log.debug("[车辆->云端] ParallelDrivingMessageRouter 处理车端消息: deviceId={}, messageType={}, isCustomProtocol={}, messageId={}", 
                         msg.getDeviceId(), msg.getMessageType(), isCustomProtocol, msg.getMessageId());
                     
                     if (isCustomProtocol) {
@@ -215,7 +231,7 @@ public class ParallelDrivingMessageRouter {
                         if (msg instanceof org.jetlinks.core.message.function.FunctionInvokeMessageReply) {
                             org.jetlinks.core.message.function.FunctionInvokeMessageReply reply = 
                                 (org.jetlinks.core.message.function.FunctionInvokeMessageReply) msg;
-                            log.info("[车辆->云端] ParallelDrivingMessageRouter 收到车端功能调用回复: deviceId={}, functionId={}, success={}, messageId={}", 
+                            log.debug("[车辆->云端] ParallelDrivingMessageRouter 收到车端功能调用回复: deviceId={}, functionId={}, success={}, messageId={}", 
                                 reply.getDeviceId(), reply.getFunctionId(), reply.isSuccess(), reply.getMessageId());
                             return handleVehicleFunctionReply(reply);
                         }
@@ -231,12 +247,51 @@ public class ParallelDrivingMessageRouter {
         log.info("ParallelDrivingMessageRouter 已初始化订阅: cockpit=[/device/parallel-driving-joystick|cockpit/*/message/send/function], vehicle=[/device/parallel-driving-vehicle|product/*/message/...]");
     }
 
+    /**
+     * remotejoystick 重复帧去重：同一驾驶舱 + 同一源时间戳 + 同一控制值指纹 → 同一样本重复发送。
+     * 驾驶舱 seq 递增上线前,用(源 timestamp + 控制值)丢弃完全重复帧。
+     */
+    private boolean isDuplicateRemoteJoystick(FunctionInvokeMessage msg) {
+        String cockpitId = msg.getDeviceId();
+        String timestamp = getStringInputOrHeader(msg, "timestamp");
+        if (cockpitId == null || timestamp == null || timestamp.isEmpty()) {
+            return false; // 缺关键字段，不去重（安全兜底）
+        }
+        String fingerprint = JSON.toJSONString(msg.getInput("joystickdata"));
+        String key = cockpitId + "|" + timestamp + "|" + fingerprint;
+        long now = System.currentTimeMillis();
+        Long prev = processedJoystickSamples.putIfAbsent(key, now);
+        if (prev != null && now - prev < JOYSTICK_DEDUP_TTL_MS) {
+            if (latencyMetrics != null) {
+                latencyMetrics.recordRemoteJoystickDedupDropped(cockpitId);
+            }
+            return true;
+        }
+        if (prev != null) {
+            processedJoystickSamples.put(key, now);
+        }
+        if (processedJoystickSamples.size() > JOYSTICK_DEDUP_MAX_SIZE) {
+            long cutoff = now - JOYSTICK_DEDUP_TTL_MS;
+            processedJoystickSamples.entrySet().removeIf(e -> e.getValue() < cutoff);
+        }
+        return false;
+    }
+
+    private String getStringInputOrHeader(FunctionInvokeMessage msg, String key) {
+        Object v = msg.getInput(key);
+        if (v == null) {
+            v = msg.getHeader(key).map(String::valueOf).orElse(null);
+        }
+        return v == null ? null : String.valueOf(v);
+    }
+
     @PreDestroy
     public void destroy() {
         if (disposable != null) {
             disposable.dispose();
         }
         processedMessages.clear();
+        processedJoystickSamples.clear();
     }
 
     private boolean isDuplicate(String messageId) {

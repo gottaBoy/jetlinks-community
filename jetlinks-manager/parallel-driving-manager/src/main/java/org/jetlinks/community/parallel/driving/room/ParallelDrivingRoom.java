@@ -3,6 +3,7 @@ package org.jetlinks.community.parallel.driving.room;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.jetlinks.community.parallel.driving.enums.ParallelDrivingSessionState;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.service.ParallelDrivingEncryptionService;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
@@ -10,6 +11,7 @@ import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.core.message.Headers;
 import reactor.core.publisher.Mono;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -48,6 +50,17 @@ public class ParallelDrivingRoom {
     private final AtomicReference<DeviceOperator> cachedVehicleDevice = new AtomicReference<>(null);
     private volatile long cachedVehicleDeviceTime = 0;
     private static final long DEVICE_CACHE_TTL_MS = 1000;
+
+    /** latest-only 信箱开关（parallel-driving.control.latest-only，默认 false 保持原行为） */
+    private volatile boolean latestOnlyEnabled = false;
+    /** remotejoystick latest-only 信箱：待发的最新一帧（覆盖式） */
+    private final AtomicReference<DeviceMessage> pendingRemoteJoystick = new AtomicReference<>();
+    /** 单飞标记：是否已有帧在途 */
+    private final AtomicBoolean remoteJoystickSending = new AtomicBoolean(false);
+    /** latest-only 信箱合并(旧帧被覆盖)计数，@Getter 暴露 */
+    private final AtomicLong coalescedRemoteJoystickMessages = new AtomicLong(0);
+    /** 指标记录器（可选注入，null 时跳过埋点） */
+    private volatile ParallelDrivingLatencyMetrics latencyMetrics;
     
     public ParallelDrivingRoom(String cockpitDeviceId, String vehicleDeviceId) {
         this.roomId = cockpitDeviceId + "-" + vehicleDeviceId;
@@ -89,6 +102,16 @@ public class ParallelDrivingRoom {
     public void setDeviceRegistry(DeviceRegistry deviceRegistry) {
         this.deviceRegistry = deviceRegistry;
     }
+
+    /** 开启/关闭 remotejoystick latest-only 信箱（默认关闭，保持单节点原行为） */
+    public void setLatestOnlyEnabled(boolean latestOnlyEnabled) {
+        this.latestOnlyEnabled = latestOnlyEnabled;
+    }
+
+    /** 设置指标记录器（可选） */
+    public void setLatencyMetrics(ParallelDrivingLatencyMetrics latencyMetrics) {
+        this.latencyMetrics = latencyMetrics;
+    }
     
     /** 从注册表获取车辆设备并缓存（供 remotejoystick 高频转发使用） */
     private Mono<DeviceOperator> fetchAndCacheDevice() {
@@ -110,6 +133,51 @@ public class ParallelDrivingRoom {
      * @return Mono<Void>
      */
     public reactor.core.publisher.Mono<Void> forwardCockpitToVehicle(DeviceMessage message) {
+        if (latestOnlyEnabled && isRemoteJoystickMessage(message)) {
+            return forwardRemoteJoystickLatestOnly(message);
+        }
+        return forwardCockpitToVehicleDirect(message);
+    }
+
+    private static boolean isRemoteJoystickMessage(DeviceMessage message) {
+        return message instanceof org.jetlinks.core.message.function.FunctionInvokeMessage
+            && "remotejoystick".equals(((org.jetlinks.core.message.function.FunctionInvokeMessage) message).getFunctionId());
+    }
+
+    /** latest-only 信箱：同一时刻最多一帧在途；新帧覆盖待发帧，发完只补发最新的，跳过中间旧帧。 */
+    private reactor.core.publisher.Mono<Void> forwardRemoteJoystickLatestOnly(DeviceMessage message) {
+        DeviceMessage replaced = pendingRemoteJoystick.getAndSet(message);
+        if (replaced != null) {
+            coalescedRemoteJoystickMessages.incrementAndGet();
+            if (latencyMetrics != null) {
+                latencyMetrics.recordRemoteJoystickMailboxCoalesced(cockpitDeviceId, vehicleDeviceId);
+            }
+        }
+        if (!remoteJoystickSending.compareAndSet(false, true)) {
+            return reactor.core.publisher.Mono.empty();
+        }
+        return drainRemoteJoystick();
+    }
+
+    private reactor.core.publisher.Mono<Void> drainRemoteJoystick() {
+        DeviceMessage next = pendingRemoteJoystick.getAndSet(null);
+        if (next == null) {
+            remoteJoystickSending.set(false);
+            return reactor.core.publisher.Mono.empty();
+        }
+        return forwardCockpitToVehicleDirect(next)
+            .doFinally(s -> {
+                remoteJoystickSending.set(false);
+                if (pendingRemoteJoystick.get() != null
+                    && remoteJoystickSending.compareAndSet(false, true)) {
+                    drainRemoteJoystick().subscribe(
+                        null,
+                        e -> log.error("[驾驶舱->云端->车辆] remotejoystick 信箱 drain 失败: {}", e.getMessage()));
+                }
+            });
+    }
+
+    private reactor.core.publisher.Mono<Void> forwardCockpitToVehicleDirect(DeviceMessage message) {
         if (state != ParallelDrivingSessionState.ACTIVE) {
             return reactor.core.publisher.Mono.error(
                 new IllegalStateException("房间状态不正确: " + state)

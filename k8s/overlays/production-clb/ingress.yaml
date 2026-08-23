@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ziot-clb
+  annotations:
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-enabled: "false"
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-httpcode: http_2xx,http_3xx
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-interval: "2"
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-method: GET
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-path: /
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-protocol: http
+    ingress.vke.volcengine.com/loadbalancer-healthcheck-timeout: "2"
+    ingress.vke.volcengine.com/loadbalancer-healthy-threshold: "3"
+    ingress.vke.volcengine.com/loadbalancer-id: clb-24a6xuilmlc744do2a6gsgdhk
+    ingress.vke.volcengine.com/loadbalancer-pass-through: "true"
+    ingress.vke.volcengine.com/loadbalancer-port: "443"
+    ingress.vke.volcengine.com/loadbalancer-protocol: https
+    ingress.vke.volcengine.com/loadbalancer-scheduler: wrr
+    ingress.vke.volcengine.com/loadbalancer-unhealthy-threshold: "3"
+spec:
+  ingressClassName: clb
+  tls:
+    - secretName: zerontruck-0903
+  rules:
+    - host: ziot.zerontruck.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ziot
+                port:
+                  number: 8848

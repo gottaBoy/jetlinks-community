@@ -2,6 +2,7 @@ package org.jetlinks.community.zota.fdc;
 
 import io.minio.*;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
@@ -39,6 +40,7 @@ import java.util.*;
  */
 @Slf4j
 @RestController
+@ConditionalOnProperty(prefix = "zota", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequestMapping("/api/firmware")
 public class FdcFirmwareController {
 

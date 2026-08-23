@@ -334,6 +334,9 @@ trace:
         - "/java/DeviceMessageMeasurementProvider/incrementMessage"
 
 parallel-driving:
+  control:
+    latest-only: true    # remotejoystick latest-only 信箱 + 串行发送(默认 false)
+    dedup: true          # remotejoystick 重复帧去重(timestamp+控制值指纹)
   vehicle-to-cockpit:
     forward-reply-function-ids:
       - emergencystop
@@ -341,7 +344,7 @@ parallel-driving:
 
 # ── ZOTA Integration ────────────────────────────────────────────
 zota:
-  enabled: true
+  enabled: true # 本地开发禁用 ZOTA 集成
   mgmt-url: ${ZOTA_MGMT_URL:http://localhost:8090}
   mgmt-username: ${ZOTA_MGMT_USERNAME:admin}
   mgmt-password: ${ZOTA_MGMT_PASSWORD:admin}
@@ -351,6 +354,7 @@ zota:
   sync:
     product-ids:
       - "K_DC_L2"
+      - "K_ZSD_A2_C"
 
 # ── ZIOT Firmware & FDC Integration ──────────────────────────────
 ziot:
@@ -376,8 +380,11 @@ ziot:
     s3-secret-key: ${S3_SECRET_KEY:}
     s3-bucket: ${S3_BUCKET:zota}
     s3-prefix: ${S3_PREFIX:firmware}   # S3 key: {productId}/firmware/{filename}
-  # FDC 设备 MQTT 凭证同步到 Redis（供 EMQX Redis 认证使用）
+  # 仅自建 MQTT Broker 时开启；当前使用第三方 MQTT 平台，凭证和 ACL 由第三方平台维护。
   sync:
+    enabled: false
     product-ids:
-      - "hc_fdc"
+    - "hc_fdc"
+    - "K_DC_L2"
+    - "K_ZSD_A2_C"
     device-password: ${FDC_DEVICE_PASSWORD:}

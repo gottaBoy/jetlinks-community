@@ -62,4 +62,29 @@ public class ParallelDrivingLatencyMetrics {
                 "function", fn)
             .increment();
     }
+
+    /** remotejoystick 重复帧被去重丢弃的计数 */
+    public static final String METRIC_REMOTE_JOYSTICK_DEDUP_DROPPED = "parallel_driving.remotejoystick.dedup_dropped";
+
+    /** remotejoystick 信箱合并（积压时旧帧被覆盖）计数 */
+    public static final String METRIC_REMOTE_JOYSTICK_MAILBOX_COALESCED = "parallel_driving.remotejoystick.mailbox_coalesced";
+
+    public void recordRemoteJoystickDedupDropped(String cockpitId) {
+        if (registry == null) {
+            return;
+        }
+        registry.counter(METRIC_REMOTE_JOYSTICK_DEDUP_DROPPED,
+                "cockpit", cockpitId != null ? cockpitId : "unknown")
+            .increment();
+    }
+
+    public void recordRemoteJoystickMailboxCoalesced(String cockpitId, String vehicleId) {
+        if (registry == null) {
+            return;
+        }
+        registry.counter(METRIC_REMOTE_JOYSTICK_MAILBOX_COALESCED,
+                "cockpit", cockpitId != null ? cockpitId : "unknown",
+                "vehicle", vehicleId != null ? vehicleId : "unknown")
+            .increment();
+    }
 }
