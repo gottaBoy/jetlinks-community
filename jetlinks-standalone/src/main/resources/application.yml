@@ -344,7 +344,7 @@ parallel-driving:
 
 # ── ZOTA Integration ────────────────────────────────────────────
 zota:
-  enabled: true # 本地开发禁用 ZOTA 集成
+  enabled: ${ZOTA_ENABLED:false} # 本地开发禁用 ZOTA 集成
   mgmt-url: ${ZOTA_MGMT_URL:http://localhost:8090}
   mgmt-username: ${ZOTA_MGMT_USERNAME:admin}
   mgmt-password: ${ZOTA_MGMT_PASSWORD:admin}

@@ -2,6 +2,7 @@ package org.jetlinks.community.parallel.driving.websocket;
 
 import com.alibaba.fastjson.JSON;
 import lombok.extern.slf4j.Slf4j;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.service.ParallelDrivingRelationService;
 import org.jetlinks.core.event.EventBus;
 import org.jetlinks.core.event.Subscription;
@@ -21,7 +22,9 @@ import reactor.core.publisher.Sinks;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.time.Duration;
 
 /**
@@ -33,15 +36,24 @@ import java.time.Duration;
 @Component
 @Slf4j
 public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
+
+    private static final String INTERNAL_EVENTBUS_RECEIVED_NANOS = "_eventbusReceivedMonoNanos";
+    private static final String INTERNAL_WEBSOCKET_QUEUED_NANOS = "_websocketQueuedMonoNanos";
+    private static final String EVENTBUS_TO_QUEUE_DURATION_MS = "eventbusToQueueDurationMs";
+    private static final String QUEUE_TO_SEND_DURATION_MS = "queueToSendDurationMs";
+    private static final String EVENTBUS_TO_SEND_DURATION_MS = "eventbusToSendDurationMs";
     
     private final ParallelDrivingRelationService relationService;
     private final EventBus eventBus;
+    private final ParallelDrivingLatencyMetrics metrics;
 
     @Autowired
     public ParallelDrivingWebSocketHandler(ParallelDrivingRelationService relationService,
-                                          @Qualifier("eventBus") EventBus eventBus) {
+                                          @Qualifier("eventBus") EventBus eventBus,
+                                          ParallelDrivingLatencyMetrics metrics) {
         this.relationService = relationService;
         this.eventBus = eventBus;
+        this.metrics = metrics;
     }
     
     // 存储 WebSocket 连接（key: sessionId, value: WebSocketSessionInfo）
@@ -53,11 +65,12 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
         log.info("WebSocket 连接建立: sessionId={}", sessionId);
         
         // 从查询参数中获取车辆设备ID或驾驶舱设备ID
-        String vehicleId = session.getHandshakeInfo().getUri().getQuery().contains("vehicleId=")
-            ? extractQueryParam(session.getHandshakeInfo().getUri().getQuery(), "vehicleId")
+        String query = session.getHandshakeInfo().getUri().getQuery();
+        String vehicleId = query != null && query.contains("vehicleId=")
+            ? extractQueryParam(query, "vehicleId")
             : null;
-        String cockpitId = session.getHandshakeInfo().getUri().getQuery().contains("cockpitId=")
-            ? extractQueryParam(session.getHandshakeInfo().getUri().getQuery(), "cockpitId")
+        String cockpitId = query != null && query.contains("cockpitId=")
+            ? extractQueryParam(query, "cockpitId")
             : null;
         
         if (vehicleId == null && cockpitId == null) {
@@ -68,13 +81,58 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
         // 创建会话信息
         WebSocketSessionInfo sessionInfo = new WebSocketSessionInfo(sessionId, vehicleId, cockpitId);
         sessions.put(sessionId, sessionInfo);
+        metrics.statusWebSocketOpened();
+        AtomicBoolean cleaned = new AtomicBoolean();
         
         // 订阅车辆状态上报
         Disposable subscription = subscribeVehicleStatus(vehicleId, cockpitId, session);
+        Runnable cleanup = () -> {
+            if (cleaned.compareAndSet(false, true)) {
+                sessions.remove(sessionId);
+                metrics.statusWebSocketClosed();
+                if (subscription != null) {
+                    subscription.dispose();
+                }
+            }
+        };
         
         // 订阅车辆状态并推送到 WebSocket
         Flux<WebSocketMessage> statusMessages = sessionInfo.getStatusFlux()
-            .map(status -> session.textMessage(JSON.toJSONString(status)))
+            .map(status -> {
+                long sentAt = System.currentTimeMillis();
+                long sentAtNanos = System.nanoTime();
+                Map<String, Object> outgoing = new HashMap<>(status);
+                outgoing.put("websocketSentAt", sentAt);
+                long eventbusReceivedAtNanos = numberValue(
+                    outgoing.get(INTERNAL_EVENTBUS_RECEIVED_NANOS),
+                    sentAtNanos
+                );
+                long queuedAtNanos = numberValue(
+                    outgoing.get(INTERNAL_WEBSOCKET_QUEUED_NANOS),
+                    sentAtNanos
+                );
+                long eventbusToSendDurationMs =
+                    monotonicDurationMs(eventbusReceivedAtNanos, sentAtNanos);
+                long queueToSendDurationMs =
+                    monotonicDurationMs(queuedAtNanos, sentAtNanos);
+                outgoing.put(EVENTBUS_TO_SEND_DURATION_MS, eventbusToSendDurationMs);
+                outgoing.put(QUEUE_TO_SEND_DURATION_MS, queueToSendDurationMs);
+                outgoing.put("serverMonotonicTimingAvailable",
+                    outgoing.containsKey(INTERNAL_EVENTBUS_RECEIVED_NANOS)
+                        && outgoing.containsKey(INTERNAL_WEBSOCKET_QUEUED_NANOS));
+                outgoing.remove(INTERNAL_EVENTBUS_RECEIVED_NANOS);
+                outgoing.remove(INTERNAL_WEBSOCKET_QUEUED_NANOS);
+                String source = String.valueOf(outgoing.remove("_observationSource"));
+                metrics.recordStatusSent(
+                    source,
+                    numberValue(outgoing.get("eventbusReceivedAt"), sentAt),
+                    numberValue(outgoing.get("websocketQueuedAt"), sentAt),
+                    sentAt,
+                    eventbusToSendDurationMs,
+                    queueToSendDurationMs
+                );
+                return session.textMessage(JSON.toJSONString(outgoing));
+            })
             .doOnComplete(() -> {
                 log.debug("WebSocket 状态推送完成: sessionId={}", sessionId);
             })
@@ -95,10 +153,7 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
         session.closeStatus()
             .doFinally((SignalType signalType) -> {
                 log.info("WebSocket 连接关闭: sessionId={}, signal={}", sessionId, signalType);
-                sessions.remove(sessionId);
-                if (subscription != null) {
-                    subscription.dispose();
-                }
+                cleanup.run();
             })
             .subscribe();
         
@@ -106,7 +161,9 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
         return Mono.zip(
             session.send(statusMessages),
             receiveHandler
-        ).then();
+        )
+            .then()
+            .doFinally(signalType -> cleanup.run());
     }
     
     /**
@@ -135,23 +192,56 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
                 .build();
             
             return eventBus.subscribe(subscription, DeviceMessage.class)
-                .cast(ReportPropertyMessage.class)
+                .ofType(ReportPropertyMessage.class)
                 .map(message -> {
+                    long eventBusReceivedAt = System.currentTimeMillis();
+                    long eventBusReceivedAtNanos = System.nanoTime();
+                    metrics.recordStatusMessageReceived(
+                        "vehicle",
+                        message.getTimestamp(),
+                        eventBusReceivedAt
+                    );
                     Map<String, Object> status = new java.util.HashMap<>();
                     status.put("type", "vehicle-status");
                     status.put("deviceId", message.getDeviceId());
                     status.put("properties", message.getProperties());
                     status.put("timestamp", message.getTimestamp());
+                    status.put("eventbusReceivedAt", eventBusReceivedAt);
+                    status.put(INTERNAL_EVENTBUS_RECEIVED_NANOS, eventBusReceivedAtNanos);
+                    status.put("_observationSource", "vehicle");
                     return status;
                 })
                 .doOnNext(status -> {
                     // chassis_status 100ms 上报时，这里会非常频繁：不要打印完整 status
                     log.debug("推送车辆状态到 WebSocket: sessionId={}, vehicleId={}, timestamp={}",
                         sessionId, vehicleId, status.get("timestamp"));
-                    sessionInfo.addStatus(status);
+                    long queuedAt = System.currentTimeMillis();
+                    long queuedAtNanos = System.nanoTime();
+                    status.put("websocketQueuedAt", queuedAt);
+                    status.put(INTERNAL_WEBSOCKET_QUEUED_NANOS, queuedAtNanos);
+                    long eventbusReceivedAtNanos = numberValue(
+                        status.get(INTERNAL_EVENTBUS_RECEIVED_NANOS),
+                        queuedAtNanos
+                    );
+                    long eventbusToQueueDurationMs =
+                        monotonicDurationMs(eventbusReceivedAtNanos, queuedAtNanos);
+                    status.put(EVENTBUS_TO_QUEUE_DURATION_MS, eventbusToQueueDurationMs);
+                    metrics.recordStatusQueued(
+                        "vehicle",
+                        numberValue(status.get("eventbusReceivedAt"), queuedAt),
+                        queuedAt,
+                        eventbusToQueueDurationMs
+                    );
+                    Sinks.EmitResult result = sessionInfo.addStatus(status);
+                    if (result.isFailure()) {
+                        metrics.recordStatusSinkFailure(result.name());
+                    }
                 })
-                .doOnError(error -> log.error("WebSocket 订阅车辆状态失败: sessionId={}, vehicleId={}", 
-                    sessionId, vehicleId, error))
+                .doOnError(error -> {
+                    metrics.recordStatusSubscriptionError("vehicle");
+                    log.error("WebSocket 订阅车辆状态失败: sessionId={}, vehicleId={}",
+                        sessionId, vehicleId, error);
+                })
                 .subscribe();
         }
         
@@ -172,23 +262,56 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
                         .build();
                     
                     return eventBus.subscribe(subscription, DeviceMessage.class)
-                        .cast(ReportPropertyMessage.class)
+                        .ofType(ReportPropertyMessage.class)
                         .map(message -> {
+                            long eventBusReceivedAt = System.currentTimeMillis();
+                            long eventBusReceivedAtNanos = System.nanoTime();
+                            metrics.recordStatusMessageReceived(
+                                "cockpit",
+                                message.getTimestamp(),
+                                eventBusReceivedAt
+                            );
                             Map<String, Object> status = new java.util.HashMap<>();
                             status.put("type", "vehicle-status");
                             status.put("deviceId", message.getDeviceId());
                             status.put("properties", message.getProperties());
                             status.put("timestamp", message.getTimestamp());
                             status.put("cockpitId", cockpitId);
+                            status.put("eventbusReceivedAt", eventBusReceivedAt);
+                            status.put(INTERNAL_EVENTBUS_RECEIVED_NANOS, eventBusReceivedAtNanos);
+                            status.put("_observationSource", "cockpit");
                             return status;
                         })
                         .doOnNext(status -> {
                             log.debug("推送车辆状态到 WebSocket: sessionId={}, cockpitId={}, vehicleId={}, timestamp={}",
                                 sessionId, cockpitId, boundVehicleId, status.get("timestamp"));
-                            sessionInfo.addStatus(status);
+                            long queuedAt = System.currentTimeMillis();
+                            long queuedAtNanos = System.nanoTime();
+                            status.put("websocketQueuedAt", queuedAt);
+                            status.put(INTERNAL_WEBSOCKET_QUEUED_NANOS, queuedAtNanos);
+                            long eventbusReceivedAtNanos = numberValue(
+                                status.get(INTERNAL_EVENTBUS_RECEIVED_NANOS),
+                                queuedAtNanos
+                            );
+                            long eventbusToQueueDurationMs =
+                                monotonicDurationMs(eventbusReceivedAtNanos, queuedAtNanos);
+                            status.put(EVENTBUS_TO_QUEUE_DURATION_MS, eventbusToQueueDurationMs);
+                            metrics.recordStatusQueued(
+                                "cockpit",
+                                numberValue(status.get("eventbusReceivedAt"), queuedAt),
+                                queuedAt,
+                                eventbusToQueueDurationMs
+                            );
+                            Sinks.EmitResult result = sessionInfo.addStatus(status);
+                            if (result.isFailure()) {
+                                metrics.recordStatusSinkFailure(result.name());
+                            }
                         })
-                        .doOnError(error -> log.error("WebSocket 订阅车辆状态失败: sessionId={}, cockpitId={}", 
-                            sessionId, cockpitId, error));
+                        .doOnError(error -> {
+                            metrics.recordStatusSubscriptionError("cockpit");
+                            log.error("WebSocket 订阅车辆状态失败: sessionId={}, cockpitId={}",
+                                sessionId, cockpitId, error);
+                        });
                 })
                 .subscribe();
         }
@@ -210,6 +333,14 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
             }
         }
         return null;
+    }
+
+    private static long numberValue(Object value, long fallback) {
+        return value instanceof Number ? ((Number) value).longValue() : fallback;
+    }
+
+    private static long monotonicDurationMs(long startNanos, long endNanos) {
+        return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
     }
     
     /**
@@ -237,7 +368,7 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
             this.statusFlux = statusSink.asFlux().sample(Duration.ofMillis(200));
         }
         
-        public synchronized void addStatus(Map<String, Object> status) {
+        public synchronized Sinks.EmitResult addStatus(Map<String, Object> status) {
             Object properties = status.get("properties");
             if (properties instanceof Map) {
                 @SuppressWarnings("unchecked")
@@ -251,6 +382,7 @@ public class ParallelDrivingWebSocketHandler implements WebSocketHandler {
             if (result.isFailure()) {
                 log.debug("WebSocket 状态入队失败: sessionId={}, result={}", sessionId, result);
             }
+            return result;
         }
         
         public Flux<Map<String, Object>> getStatusFlux() {
