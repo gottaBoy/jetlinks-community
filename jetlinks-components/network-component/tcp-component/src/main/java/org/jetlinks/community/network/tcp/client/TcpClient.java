@@ -74,4 +74,14 @@ public interface TcpClient extends Network, ClientConnection {
      * 重置
      */
     void reset();
+
+    /**
+     * Bind an authenticated device identifier for connection-level observability.
+     *
+     * <p>Some TCP clients cannot identify the device, so the default is a no-op.</p>
+     *
+     * @param deviceId device identifier
+     */
+    default void setDeviceId(String deviceId) {
+    }
 }

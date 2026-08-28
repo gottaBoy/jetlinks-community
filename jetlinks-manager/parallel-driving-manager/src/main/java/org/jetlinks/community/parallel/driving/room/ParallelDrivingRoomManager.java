@@ -10,12 +10,14 @@ import org.jetlinks.core.device.DeviceRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import javax.annotation.PreDestroy;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,6 +30,19 @@ public class ParallelDrivingRoomManager {
     private static final String VEHICLE_INDEX_PREFIX = "pd:room:idx:vehicle:";
     private static final Duration REDIS_TTL = Duration.ofHours(12);
     private static final long L1_CACHE_TTL_MS = 2000;
+    /**
+     * Delete the room and its indexes only if the room metadata is unchanged
+     * since the close operation started. This prevents an old asynchronous
+     * close from deleting a newly-created room for the same device pair.
+     */
+    private static final RedisScript<Object> CLOSE_ROOM_SCRIPT = RedisScript.of(
+        "local current = redis.call('GET', KEYS[1])\n" +
+        "local cockpit = redis.call('GET', KEYS[2])\n" +
+        "local vehicle = redis.call('GET', KEYS[3])\n" +
+        "if current == ARGV[1] and cockpit == ARGV[2] and vehicle == ARGV[2] then\n" +
+        "  return redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])\n" +
+        "end\n" +
+        "return 0\n", Object.class);
 
     private final DeviceRegistry deviceRegistry;
     private final ParallelDrivingEncryptionService encryptionService;
@@ -169,19 +184,37 @@ public class ParallelDrivingRoomManager {
     public Mono<Void> closeRoom(String cockpitId, String vehicleId) {
         String roomKey = cockpitId + "-" + vehicleId;
 
-        ParallelDrivingRoom local = localRooms.remove(roomKey);
-        cockpitIndexCache.remove(cockpitId);
-        vehicleIndexCache.remove(vehicleId);
+        ParallelDrivingRoom local = localRooms.get(roomKey);
+        if (local != null) {
+            localRooms.remove(roomKey, local);
+        }
 
         Mono<Void> closeLocal = (local != null) ? local.close() : Mono.empty();
 
-        return closeLocal.then(
-            redis.delete(ROOM_INFO_PREFIX + roomKey,
-                         COCKPIT_INDEX_PREFIX + cockpitId,
-                         VEHICLE_INDEX_PREFIX + vehicleId)
-                .doOnSuccess(count -> log.info("关闭房间[{}]: 清理 {} 个 Redis 键", roomKey, count))
-                .then()
-        );
+        return closeLocal
+            .then(redis.opsForValue().get(ROOM_INFO_PREFIX + roomKey)
+                .cast(String.class)
+                .defaultIfEmpty(""))
+            .flatMap(snapshot -> {
+                if (snapshot.isEmpty()) {
+                    // No metadata means there is no safe generation to match.
+                    // Leave stale indexes for the cleanup scheduler rather than
+                    // risking deletion of a newer room.
+                    return Mono.empty();
+                }
+                return redis.execute(
+                        CLOSE_ROOM_SCRIPT,
+                        Arrays.asList(
+                            ROOM_INFO_PREFIX + roomKey,
+                            COCKPIT_INDEX_PREFIX + cockpitId,
+                            VEHICLE_INDEX_PREFIX + vehicleId),
+                        snapshot,
+                        roomKey)
+                    .next()
+                    .doOnNext(count -> log.info(
+                        "关闭房间[{}]: 条件清理 Redis 键，结果={}", roomKey, count))
+                    .then();
+            });
     }
 
     public Flux<ParallelDrivingRoom> getAllActiveRooms() {

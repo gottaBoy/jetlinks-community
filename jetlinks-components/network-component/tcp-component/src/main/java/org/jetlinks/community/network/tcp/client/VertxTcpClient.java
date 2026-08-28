@@ -41,18 +41,33 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 public class VertxTcpClient implements TcpClient {
 
+    private static final long WRITE_SLOW_THRESHOLD_MS = Math.max(
+        0,
+        Long.getLong("gateway.tcp.network.write-slow-ms", 300L)
+    );
+
     public volatile NetClient client;
 
-    public NetSocket socket;
+    public volatile NetSocket socket;
 
     volatile PayloadParser payloadParser;
 
     @Getter
     private final String id;
+
+    private volatile String deviceId = "unknown";
+
+    private volatile long socketConnectedAtNanos;
+
+    private volatile long socketGeneration;
+
+    private final AtomicLong writeSequence = new AtomicLong();
 
     @Setter
     private long keepAliveTimeoutMs = Duration.ofMinutes(10).toMillis();
@@ -91,22 +106,84 @@ public class VertxTcpClient implements TcpClient {
     public Mono<Void> sendMessage(EncodedMessage message) {
         return Mono
             .<Void>create((sink) -> {
-                if (socket == null) {
+                NetSocket currentSocket = socket;
+                if (currentSocket == null) {
+                    ReferenceCountUtil.safeRelease(message.getPayload());
                     sink.error(new SocketException("socket closed"));
                     return;
                 }
                 ByteBuf buf = message.getPayload();
                 Buffer buffer = Buffer.buffer(buf);
                 int len = buffer.length();
-                socket.write(buffer, r -> {
-                    ReferenceCountUtil.safeRelease(buf);
-                    if (r.succeeded()) {
-                        keepAlive();
-                        sink.success();
-                    } else {
-                        sink.error(r.cause());
+                long writeStartNanos = System.nanoTime();
+                long writeConnectionStartNanos = socketConnectedAtNanos;
+                long writeSocketGeneration = socketGeneration;
+                long writeId = writeSequence.incrementAndGet();
+                boolean queueFull = currentSocket.writeQueueFull();
+                sink.onCancel(() -> log.debug(
+                    "[tcp-write] write_cancel writeId={} clientId={} deviceId={} remoteAddress={} "
+                        + "connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                        + "writeQueueFullAtStart={}",
+                    writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                    connectionAgeMs(writeConnectionStartNanos), len, queueFull
+                ));
+                log.debug("[tcp-write] write_start writeId={} clientId={} deviceId={} remoteAddress={} "
+                        + "connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                        + "writeQueueFull={}",
+                    writeId, id, deviceId, remoteAddress(currentSocket),
+                    writeSocketGeneration, connectionAgeMs(writeConnectionStartNanos), len, queueFull);
+                if (queueFull) {
+                    log.warn("[tcp-write] write_queue_full writeId={} clientId={} deviceId={} remoteAddress={} "
+                            + "connectionGeneration={} connectionAgeMs={} payloadBytes={}",
+                        writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                        connectionAgeMs(writeConnectionStartNanos), len);
+                }
+                AtomicBoolean released = new AtomicBoolean();
+                try {
+                    currentSocket.write(buffer, r -> {
+                        if (released.compareAndSet(false, true)) {
+                            ReferenceCountUtil.safeRelease(buf);
+                        }
+                        long durationMs = Duration.ofNanos(
+                            Math.max(0, System.nanoTime() - writeStartNanos)
+                        ).toMillis();
+                        if (r.succeeded()) {
+                            keepAlive();
+                            log.debug("[tcp-write] write_complete writeId={} clientId={} deviceId={} "
+                                    + "remoteAddress={} connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                                    + "writeDurationMs={} writeQueueFullAtStart={}",
+                                writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                                connectionAgeMs(writeConnectionStartNanos), len, durationMs, queueFull);
+                            if (durationMs >= WRITE_SLOW_THRESHOLD_MS && WRITE_SLOW_THRESHOLD_MS > 0) {
+                                log.warn("[tcp-write] write_complete_slow writeId={} clientId={} deviceId={} "
+                                        + "remoteAddress={} connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                                        + "writeDurationMs={} writeQueueFullAtStart={}",
+                                    writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                                    connectionAgeMs(writeConnectionStartNanos), len, durationMs, queueFull);
+                            }
+                            sink.success();
+                        } else {
+                            log.warn("[tcp-write] write_error writeId={} clientId={} deviceId={} "
+                                    + "remoteAddress={} connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                                    + "writeDurationMs={} writeQueueFullAtStart={} cause={}",
+                                writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                                connectionAgeMs(writeConnectionStartNanos), len, durationMs, queueFull, r.cause());
+                            sink.error(r.cause());
+                        }
+                    });
+                } catch (Throwable error) {
+                    if (released.compareAndSet(false, true)) {
+                        ReferenceCountUtil.safeRelease(buf);
                     }
-                });
+                    log.warn("[tcp-write] write_throwable writeId={} clientId={} deviceId={} "
+                            + "remoteAddress={} connectionGeneration={} connectionAgeMs={} payloadBytes={} "
+                            + "writeDurationMs={} writeQueueFullAtStart={}",
+                        writeId, id, deviceId, remoteAddress(currentSocket), writeSocketGeneration,
+                        connectionAgeMs(writeConnectionStartNanos), len, Duration.ofNanos(
+                            Math.max(0, System.nanoTime() - writeStartNanos)
+                        ).toMillis(), queueFull, error);
+                    sink.error(error);
+                }
             });
     }
 
@@ -170,23 +247,48 @@ public class VertxTcpClient implements TcpClient {
 
     @Override
     public void shutdown() {
-        if (socket == null) {
-            return;
-        }
-        log.debug("tcp client [{}] disconnect", getId());
+        NetSocket currentSocket;
+        long currentGeneration;
         synchronized (this) {
-            if (null != client) {
-                execute(client::close);
-                client = null;
+            currentSocket = socket;
+            currentGeneration = socketGeneration;
+        }
+        if (currentSocket != null) {
+            shutdownIfCurrent(currentSocket, currentGeneration);
+        }
+    }
+
+    private void shutdownIfCurrent(NetSocket expectedSocket, long expectedGeneration) {
+        NetClient clientToClose;
+        NetSocket socketToClose;
+        PayloadParser parserToClose;
+        synchronized (this) {
+            if (socket != expectedSocket || socketGeneration != expectedGeneration) {
+                log.debug("[tcp-connection] stale_close_ignored clientId={} deviceId={} "
+                        + "expectedGeneration={} currentGeneration={}",
+                    id, deviceId, expectedGeneration, socketGeneration);
+                return;
             }
-            if (null != socket) {
-                execute(socket::close);
-                this.socket = null;
-            }
-            if (null != payloadParser) {
-                execute(payloadParser::close);
-                payloadParser = null;
-            }
+            clientToClose = client;
+            socketToClose = socket;
+            parserToClose = payloadParser;
+            client = null;
+            socket = null;
+            payloadParser = null;
+        }
+
+        log.info("[tcp-connection] close clientId={} deviceId={} remoteAddress={} "
+                + "connectionGeneration={} connectionAgeMs={}",
+            id, deviceId, remoteAddress(expectedSocket), expectedGeneration,
+            connectionAgeMs(socketConnectedAtNanos));
+        if (clientToClose != null) {
+            execute(clientToClose::close);
+        }
+        if (socketToClose != null) {
+            execute(socketToClose::close);
+        }
+        if (parserToClose != null) {
+            execute(parserToClose::close);
         }
         for (Runnable runnable : disconnectListener) {
             execute(runnable);
@@ -218,27 +320,93 @@ public class VertxTcpClient implements TcpClient {
     }
 
     public void setSocket(NetSocket socket) {
+        NetSocket oldSocket;
+        long connectionGeneration;
+        long connectionStartNanos;
         synchronized (this) {
             Objects.requireNonNull(payloadParser);
-            if (this.socket != null && this.socket != socket) {
-                this.socket.close();
+            oldSocket = this.socket != socket ? this.socket : null;
+            connectionGeneration = ++socketGeneration;
+            connectionStartNanos = System.nanoTime();
+            socketConnectedAtNanos = connectionStartNanos;
+            this.socket = socket;
+            if (oldSocket != null) {
+                log.warn("[tcp-connection] replace_socket clientId={} deviceId={} "
+                        + "oldRemoteAddress={} newRemoteAddress={}",
+                    id, deviceId, remoteAddress(oldSocket), remoteAddress(socket));
             }
-            this.socket = socket
-                .closeHandler(v -> shutdown())
+            socket
+                .exceptionHandler(error -> log.error(
+                    "[tcp-connection] exception clientId={} deviceId={} remoteAddress={} "
+                        + "connectionGeneration={} connectionAgeMs={}",
+                    id, deviceId, remoteAddress(socket), connectionGeneration,
+                    connectionAgeMs(connectionStartNanos), error))
+                .closeHandler(v -> {
+                    log.info("[tcp-connection] closed clientId={} deviceId={} remoteAddress={} "
+                            + "connectionGeneration={} connectionAgeMs={}",
+                        id, deviceId, remoteAddress(socket), connectionGeneration,
+                        connectionAgeMs(connectionStartNanos));
+                    shutdownIfCurrent(socket, connectionGeneration);
+                })
                 .handler(buffer -> {
+                    PayloadParser currentParser;
+                    synchronized (this) {
+                        if (this.socket != socket || socketGeneration != connectionGeneration) {
+                            log.debug("[tcp-connection] stale_data_ignored clientId={} deviceId={} "
+                                    + "connectionGeneration={} currentGeneration={} payloadBytes={}",
+                                id, deviceId, connectionGeneration, socketGeneration, buffer.length());
+                            execute(socket::close);
+                            return;
+                        }
+                        currentParser = payloadParser;
+                        if (currentParser == null) {
+                            return;
+                        }
+                        keepAlive();
+                        // Keep the parser alive while it consumes the buffer. This is a
+                        // short critical section and prevents setRecordParser/shutdown
+                        // from closing it concurrently.
+                        currentParser.handle(buffer);
+                    }
                     if (log.isDebugEnabled()) {
                         log.debug("handle tcp client[{}] payload:[{}]",
                                   socket.remoteAddress(),
                                   Hex.encodeHexString(buffer.getBytes()));
                     }
-                    keepAlive();
-                    payloadParser.handle(buffer);
-                    if (this.socket != null && this.socket != socket) {
-                        log.warn("tcp client [{}] memory leak ", socket.remoteAddress());
-                        socket.close();
-                    }
                 });
+            log.info("[tcp-connection] connected clientId={} deviceId={} remoteAddress={} "
+                        + "connectionGeneration={}",
+                id, deviceId, remoteAddress(socket), connectionGeneration);
         }
+        if (oldSocket != null) {
+            execute(oldSocket::close);
+        }
+    }
+
+    @Override
+    public void setDeviceId(String deviceId) {
+        this.deviceId = deviceId == null || deviceId.isEmpty() ? "unknown" : deviceId;
+        log.info("[tcp-connection] device_bound clientId={} deviceId={} remoteAddress={} "
+                + "connectionAgeMs={}",
+            id, this.deviceId, remoteAddress(socket), connectionAgeMs());
+    }
+
+    private String remoteAddress(NetSocket currentSocket) {
+        if (currentSocket == null || currentSocket.remoteAddress() == null) {
+            return "unknown";
+        }
+        return String.valueOf(currentSocket.remoteAddress());
+    }
+
+    private long connectionAgeMs() {
+        return connectionAgeMs(socketConnectedAtNanos);
+    }
+
+    private long connectionAgeMs(long connectedAtNanos) {
+        if (connectedAtNanos <= 0) {
+            return 0;
+        }
+        return Duration.ofNanos(Math.max(0, System.nanoTime() - connectedAtNanos)).toMillis();
     }
 
     @Override

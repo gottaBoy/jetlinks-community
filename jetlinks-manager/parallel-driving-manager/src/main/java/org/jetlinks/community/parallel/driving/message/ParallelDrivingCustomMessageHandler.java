@@ -20,9 +20,12 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 平行驾驶自定义消息处理器
@@ -50,7 +53,7 @@ public class ParallelDrivingCustomMessageHandler {
 
     /** updateLastActiveTime 防抖：500ms 内同一 cockpit+vehicle 只更新一次，降低 DB 压力 */
     private static final long LAST_ACTIVE_DEBOUNCE_MS = 500;
-    private final ConcurrentHashMap<String, Long> lastActiveTimeUpdateCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicLong> lastActiveTimeUpdateCache = new ConcurrentHashMap<>();
 
     private static class CachedRoom {
         final ParallelDrivingRoom room;
@@ -82,13 +85,26 @@ public class ParallelDrivingCustomMessageHandler {
     private void scheduleUpdateLastActiveTimeDebounced(String cockpitId, String vehicleId) {
         long now = System.currentTimeMillis();
         String key = cockpitId + ":" + vehicleId;
-        Long prev = lastActiveTimeUpdateCache.get(key);
-        if (prev != null && now - prev < LAST_ACTIVE_DEBOUNCE_MS) {
-            return;
+        AtomicLong lastUpdated = lastActiveTimeUpdateCache.computeIfAbsent(
+            key, ignored -> new AtomicLong(Long.MIN_VALUE));
+        while (true) {
+            long previous = lastUpdated.get();
+            if (previous != Long.MIN_VALUE && now - previous < LAST_ACTIVE_DEBOUNCE_MS) {
+                return;
+            }
+            if (lastUpdated.compareAndSet(previous, now)) {
+                break;
+            }
         }
-        lastActiveTimeUpdateCache.put(key, now);
         relationService.updateLastActiveTime(cockpitId, vehicleId)
             .subscribe(v -> {}, e -> log.debug("updateLastActiveTime debounced failed: {}", e.getMessage()));
+    }
+
+    private void removeCachedRoomIfSame(String cockpitId, ParallelDrivingRoom room, String vehicleId) {
+        remotejoystickRoomCache.computeIfPresent(cockpitId, (key, current) ->
+            current.room == room && java.util.Objects.equals(current.vehicleId, vehicleId)
+                ? null
+                : current);
     }
 
     @Autowired
@@ -728,7 +744,7 @@ public class ParallelDrivingCustomMessageHandler {
                 .doOnSuccess(v -> recordPlatformLatency(cockpitDeviceId, vehicleId, startMs));
         }
         if (cached != null && (cached.isExpired() || !cached.room.isActive())) {
-            remotejoystickRoomCache.remove(cockpitDeviceId);
+            remotejoystickRoomCache.remove(cockpitDeviceId, cached);
         }
         
         // 3. 获取目标车辆：优先房间，其次消息 vin/targetDeviceId
@@ -773,12 +789,17 @@ public class ParallelDrivingCustomMessageHandler {
                 if (customMessageId == null || customMessageId.isEmpty()) {
                     customMessageId = finalId != null && !finalId.isEmpty() ? finalId : java.util.UUID.randomUUID().toString();
                 }
+                String effectiveSeq = finalSeq != null && !finalSeq.isEmpty() ? finalSeq : "1";
+                String correlationId = deviceMessage.getHeader("correlationId")
+                    .map(String::valueOf)
+                    .orElse(customMessageId);
                 forwardMsg.put("id", customMessageId); // 使用 messageId 作为自定义消息的 id
                 log.debug("[驾驶舱->云端->车辆] 设置自定义消息 id: id={}, messageId={}, originalId={}", 
                     customMessageId, deviceMessage.getMessageId(), finalId);
                 forwardMsg.put("type", "oms"); // 从云端发送到车辆
                 forwardMsg.put("omsno", finalOmsno != null && !finalOmsno.isEmpty() ? finalOmsno : cockpitDeviceId); // 使用提供的omsno或驾驶舱ID
-                forwardMsg.put("seq", finalSeq != null && !finalSeq.isEmpty() ? finalSeq : "1"); // 使用提供的seq或默认值
+                forwardMsg.put("seq", effectiveSeq); // 使用提供的seq或默认值
+                forwardMsg.put("correlationId", correlationId);
                 forwardMsg.put("version", finalVersion != null && !finalVersion.isEmpty() ? finalVersion : "1.0"); // 使用提供的version或默认值
                 forwardMsg.put("timestamp", finalTimestamp != null && !finalTimestamp.isEmpty() ? finalTimestamp : 
                     java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))); // 使用提供的时间戳或当前时间
@@ -788,6 +809,7 @@ public class ParallelDrivingCustomMessageHandler {
                 FunctionInvokeMessage controlMessage = new FunctionInvokeMessage();
                 controlMessage.setDeviceId(cockpitDeviceId);
                 controlMessage.setFunctionId("remotejoystick");
+                controlMessage.setMessageId(customMessageId);
                 
                 // 验证 functionId 是否设置成功
                 String verifyFunctionId = controlMessage.getFunctionId();
@@ -809,9 +831,9 @@ public class ParallelDrivingCustomMessageHandler {
                 if (finalOmsno != null && !finalOmsno.isEmpty()) {
                     controlMessage.addInput("omsno", finalOmsno);
                 }
-                if (finalSeq != null && !finalSeq.isEmpty()) {
-                    controlMessage.addInput("seq", finalSeq);
-                }
+                controlMessage.addInput("seq", effectiveSeq);
+                controlMessage.addInput("correlationId", correlationId);
+                controlMessage.addHeader("seq", effectiveSeq);
                 if (finalVersion != null && !finalVersion.isEmpty()) {
                     controlMessage.addInput("version", finalVersion);
                 }
@@ -821,6 +843,7 @@ public class ParallelDrivingCustomMessageHandler {
                 controlMessage.addHeader("targetDeviceId", vehicleId);
                 controlMessage.addHeader("customProtocol", "true");
                 controlMessage.addHeader("messageType", "remotejoystick");
+                controlMessage.addHeader("correlationId", correlationId);
                 // 在 header 中也添加 functionId（双重保险）
                 controlMessage.addHeader("functionId", "remotejoystick");
                 controlMessage.addHeader("function", "remotejoystick");
@@ -847,7 +870,11 @@ public class ParallelDrivingCustomMessageHandler {
             .doOnSuccess(v -> log.debug("[驾驶舱->云端->车辆] 远程摇杆控制指令转发成功: cockpit={}, vehicle={}",
                 cockpitDeviceId, vehicleId))
             .doOnError(error -> {
-                remotejoystickRoomCache.remove(cockpitDeviceId);
+                CachedRoom cachedOnError = remotejoystickRoomCache.get(cockpitDeviceId);
+                if (cachedOnError != null
+                    && java.util.Objects.equals(cachedOnError.vehicleId, vehicleId)) {
+                    removeCachedRoomIfSame(cockpitDeviceId, cachedOnError.room, vehicleId);
+                }
                 log.error("[驾驶舱->云端->车辆] 远程摇杆控制指令转发失败: cockpit={}, vehicle={}", 
                     cockpitDeviceId, vehicleId, error);
             });
@@ -865,10 +892,15 @@ public class ParallelDrivingCustomMessageHandler {
         if (customMessageId == null || customMessageId.isEmpty()) {
             customMessageId = finalId != null && !finalId.isEmpty() ? finalId : java.util.UUID.randomUUID().toString();
         }
+        String effectiveSeq = finalSeq != null && !finalSeq.isEmpty() ? finalSeq : "1";
+        String correlationId = deviceMessage.getHeader("correlationId")
+            .map(String::valueOf)
+            .orElse(customMessageId);
         forwardMsg.put("id", customMessageId);
         forwardMsg.put("type", "oms");
         forwardMsg.put("omsno", finalOmsno != null && !finalOmsno.isEmpty() ? finalOmsno : cockpitDeviceId);
-        forwardMsg.put("seq", finalSeq != null && !finalSeq.isEmpty() ? finalSeq : "1");
+        forwardMsg.put("seq", effectiveSeq);
+        forwardMsg.put("correlationId", correlationId);
         forwardMsg.put("version", finalVersion != null && !finalVersion.isEmpty() ? finalVersion : "1.0");
         forwardMsg.put("timestamp", finalTimestamp != null && !finalTimestamp.isEmpty() ? finalTimestamp :
             java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
@@ -877,16 +909,20 @@ public class ParallelDrivingCustomMessageHandler {
         FunctionInvokeMessage controlMessage = new FunctionInvokeMessage();
         controlMessage.setDeviceId(cockpitDeviceId);
         controlMessage.setFunctionId("remotejoystick");
+        controlMessage.setMessageId(customMessageId);
         controlMessage.addInput("customMessage", forwardMsg.toJSONString());
         controlMessage.addInput("joystickdata", finalJoystickdata);
         controlMessage.addInput("vin", vehicleId);
         if (finalOmsno != null && !finalOmsno.isEmpty()) controlMessage.addInput("omsno", finalOmsno);
-        if (finalSeq != null && !finalSeq.isEmpty()) controlMessage.addInput("seq", finalSeq);
+        controlMessage.addInput("seq", effectiveSeq);
+        controlMessage.addInput("correlationId", correlationId);
+        controlMessage.addHeader("seq", effectiveSeq);
         if (finalVersion != null && !finalVersion.isEmpty()) controlMessage.addInput("version", finalVersion);
         if (finalTimestamp != null && !finalTimestamp.isEmpty()) controlMessage.addInput("timestamp", finalTimestamp);
         controlMessage.addHeader("targetDeviceId", vehicleId);
         controlMessage.addHeader("customProtocol", "true");
         controlMessage.addHeader("messageType", "remotejoystick");
+        controlMessage.addHeader("correlationId", correlationId);
         controlMessage.addHeader("functionId", "remotejoystick");
         controlMessage.addHeader("function", "remotejoystick");
         controlMessage.addHeaderIfAbsent(Headers.force, true);
@@ -895,7 +931,7 @@ public class ParallelDrivingCustomMessageHandler {
             .doOnSuccess(v -> scheduleUpdateLastActiveTimeDebounced(cockpitDeviceId, vehicleId))
             .doOnSuccess(v -> log.debug("[驾驶舱->云端->车辆] 远程摇杆控制指令转发成功(缓存): cockpit={}, vehicle={}", cockpitDeviceId, vehicleId))
             .doOnError(error -> {
-                remotejoystickRoomCache.remove(cockpitDeviceId);
+                removeCachedRoomIfSame(cockpitDeviceId, room, vehicleId);
                 log.error("[驾驶舱->云端->车辆] 远程摇杆控制指令转发失败(缓存): cockpit={}, vehicle={}", cockpitDeviceId, vehicleId, error);
             });
     }
@@ -1014,11 +1050,13 @@ public class ParallelDrivingCustomMessageHandler {
      * 收到本回复后计算 RTT=收包时刻-发包时刻（建议用单调时钟），再将结果写入属性 {@code cloud_link_rtt_ms}
      * 或 {@code chassis_status.cloud_link_rtt_ms}，随状态上报即可在远控页展示。
      * <p>
-     * 另输出 {@code serverReceiveTimeMs}（路由入口时刻）、{@code serverReplyTimeMs}（组包下发前时刻），
-     * 车端可用 wall 时钟估算「纯网络」往返：{@code (clientRecv-clientSend) - (serverReply-serverReceive)}，
-     * 需车与平台 NTP 同步，结果写入 {@code cloud_link_network_rtt_ms}。
+     * 另输出 {@code serverReceiveTimeMs}、{@code serverReplyTimeMs} 和
+     * {@code serverProcessingMs}。其中处理耗时使用平台 JVM 单调时钟测量，不受 NTP 或系统
+     * wall clock 调整影响；车端可用 {@code RTT - serverProcessingMs} 估算网络往返。
      */
-    public Mono<Void> replyToCloudLinkPing(FunctionInvokeMessage invoke, long serverReceiveTimeMs) {
+    public Mono<Void> replyToCloudLinkPing(FunctionInvokeMessage invoke,
+                                           long serverReceiveTimeMs,
+                                           long serverReceiveTimeNanos) {
         String deviceId = invoke.getDeviceId();
         if (deviceId == null || deviceId.isEmpty()) {
             log.warn("[cloudLinkPing] skip pong: missing deviceId requestMessageId={}", invoke.getMessageId());
@@ -1034,9 +1072,13 @@ public class ParallelDrivingCustomMessageHandler {
             }
         }
         long serverReplyTimeMs = System.currentTimeMillis();
+        long serverProcessingMs = Math.max(
+            0,
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - serverReceiveTimeNanos));
         output.put("serverReceiveTimeMs", serverReceiveTimeMs);
         output.put("serverReplyTimeMs", serverReplyTimeMs);
         output.put("serverTimeMs", serverReplyTimeMs);
+        output.put("serverProcessingMs", serverProcessingMs);
 
         FunctionInvokeMessageReply reply = new FunctionInvokeMessageReply();
         reply.setDeviceId(deviceId);
@@ -1049,9 +1091,9 @@ public class ParallelDrivingCustomMessageHandler {
         reply.setOutput(output);
 
         String replyMessageId = reply.getMessageId();
-        log.info("[cloudLinkPing] send_pong deviceId={} requestMessageId={} replyMessageId={} serverReceiveTimeMs={} serverReplyTimeMs={} platformProcessMs={}",
+        log.info("[cloudLinkPing] send_pong deviceId={} requestMessageId={} replyMessageId={} serverReceiveTimeMs={} serverReplyTimeMs={} serverProcessingMs={}",
             deviceId, invoke.getMessageId(), replyMessageId, serverReceiveTimeMs, serverReplyTimeMs,
-            Math.max(0, serverReplyTimeMs - serverReceiveTimeMs));
+            serverProcessingMs);
 
         // 使用 sendAndForget：send() 会等待设备对下行消息的协议应答，TCP 车端收到 INVOKE_FUNCTION_REPLY 后通常不回包，导致 DefaultDeviceMessageSender 超时
         return deviceRegistry.getDevice(deviceId)
@@ -1060,7 +1102,13 @@ public class ParallelDrivingCustomMessageHandler {
                     deviceId, invoke.getMessageId());
                 return Mono.empty();
             }))
-            .flatMap(op -> op.messageSender().sendAndForget(reply).then())
+            // The vehicle does not send a protocol ACK for this reply. Keep
+            // the low-frequency ping path bounded if the gateway/socket is
+            // unhealthy, while leaving the high-frequency joystick path
+            // untouched.
+            .flatMap(op -> op.messageSender().sendAndForget(reply)
+                .timeout(Duration.ofSeconds(1))
+                .then())
             .doOnSuccess(v -> log.debug("[cloudLinkPing] send_pong_done deviceId={} requestMessageId={}",
                 deviceId, invoke.getMessageId()))
             .onErrorResume(err -> {

@@ -1,6 +1,7 @@
 package org.jetlinks.community.parallel.driving.metrics;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -25,16 +26,68 @@ public class ParallelDrivingLatencyMetrics {
 
     private final MeterRegistry registry;
     private final AtomicInteger activeStatusWebSocketSessions = new AtomicInteger();
+    private final AtomicInteger remoteJoystickInflightSends = new AtomicInteger();
+    private final Timer remoteJoystickPlatformLatency;
+    private final Counter remoteJoystickDedupDropped;
+    private final Counter remoteJoystickMailboxCoalesced;
+    private final Counter remoteJoystickSendStarted;
+    private final Timer remoteJoystickMailboxPendingAge;
+    private final Timer remoteJoystickSendCompletionOnComplete;
+    private final Timer remoteJoystickSendCompletionOnError;
+    private final Timer remoteJoystickSendCompletionCancel;
+    private final Timer remoteJoystickSendCompletionOther;
+    private final Counter remoteJoystickInflightSlow;
+    private final Timer remoteJoystickInflightSlowDuration;
 
     @Autowired(required = false)
     public ParallelDrivingLatencyMetrics(MeterRegistry registry) {
         this.registry = registry;
         if (registry != null) {
+            remoteJoystickPlatformLatency = Timer.builder(METRIC_PLATFORM_LATENCY)
+                .description("remotejoystick 平台处理延迟：收到驾驶舱消息到 publish 到设备网关")
+                .register(registry);
+            remoteJoystickDedupDropped = registry.counter(METRIC_REMOTE_JOYSTICK_DEDUP_DROPPED);
+            remoteJoystickMailboxCoalesced = registry.counter(METRIC_REMOTE_JOYSTICK_MAILBOX_COALESCED);
+            remoteJoystickSendStarted = registry.counter(METRIC_REMOTE_JOYSTICK_SEND_STARTED);
+            remoteJoystickMailboxPendingAge = Timer.builder(METRIC_REMOTE_JOYSTICK_MAILBOX_PENDING_AGE)
+                .description("remotejoystick latest-only 信箱中最新帧被取出发送前的等待时间")
+                .register(registry);
+            remoteJoystickSendCompletionOnComplete = completionTimer(registry, "on_complete");
+            remoteJoystickSendCompletionOnError = completionTimer(registry, "on_error");
+            remoteJoystickSendCompletionCancel = completionTimer(registry, "cancel");
+            remoteJoystickSendCompletionOther = completionTimer(registry, "other");
+            remoteJoystickInflightSlow = registry.counter(METRIC_REMOTE_JOYSTICK_INFLIGHT_SLOW);
+            remoteJoystickInflightSlowDuration = Timer.builder(METRIC_REMOTE_JOYSTICK_INFLIGHT_SLOW + ".duration")
+                .description("remotejoystick latest-only 当前在途发送被观察到的持续时间")
+                .register(registry);
             registry.gauge(
                 "parallel_driving.status_websocket.active_sessions",
                 activeStatusWebSocketSessions
             );
+            registry.gauge(
+                METRIC_REMOTE_JOYSTICK_INFLIGHT,
+                remoteJoystickInflightSends
+            );
+        } else {
+            remoteJoystickPlatformLatency = null;
+            remoteJoystickDedupDropped = null;
+            remoteJoystickMailboxCoalesced = null;
+            remoteJoystickSendStarted = null;
+            remoteJoystickMailboxPendingAge = null;
+            remoteJoystickSendCompletionOnComplete = null;
+            remoteJoystickSendCompletionOnError = null;
+            remoteJoystickSendCompletionCancel = null;
+            remoteJoystickSendCompletionOther = null;
+            remoteJoystickInflightSlow = null;
+            remoteJoystickInflightSlowDuration = null;
         }
+    }
+
+    private static Timer completionTimer(MeterRegistry registry, String result) {
+        return Timer.builder(METRIC_REMOTE_JOYSTICK_SEND_COMPLETION_LATENCY)
+            .tag("result", result)
+            .description("remotejoystick 从开始转发到设备发送器完成的耗时")
+            .register(registry);
     }
 
     /**
@@ -48,12 +101,7 @@ public class ParallelDrivingLatencyMetrics {
         if (registry == null) {
             return;
         }
-        Timer.builder(METRIC_PLATFORM_LATENCY)
-            .tag("cockpit", cockpitId != null ? cockpitId : "unknown")
-            .tag("vehicle", vehicleId != null ? vehicleId : "unknown")
-            .description("remotejoystick 平台处理延迟：收到驾驶舱消息到 publish 到设备网关")
-            .register(registry)
-            .record(durationMs, TimeUnit.MILLISECONDS);
+        remoteJoystickPlatformLatency.record(durationMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -77,23 +125,94 @@ public class ParallelDrivingLatencyMetrics {
     /** remotejoystick 信箱合并（积压时旧帧被覆盖）计数 */
     public static final String METRIC_REMOTE_JOYSTICK_MAILBOX_COALESCED = "parallel_driving.remotejoystick.mailbox_coalesced";
 
+    /** remotejoystick 当前正在等待设备发送完成的数量 */
+    public static final String METRIC_REMOTE_JOYSTICK_INFLIGHT = "parallel_driving.remotejoystick.inflight";
+
+    /** remotejoystick 在 latest-only 信箱中的等待时间 */
+    public static final String METRIC_REMOTE_JOYSTICK_MAILBOX_PENDING_AGE = "parallel_driving.remotejoystick.mailbox_pending_age";
+
+    /** remotejoystick 从开始转发到设备发送器完成的耗时 */
+    public static final String METRIC_REMOTE_JOYSTICK_SEND_COMPLETION_LATENCY = "parallel_driving.remotejoystick.send_completion_latency";
+
+    /** remotejoystick 在途发送超过安全观测阈值的次数 */
+    public static final String METRIC_REMOTE_JOYSTICK_INFLIGHT_SLOW = "parallel_driving.remotejoystick.inflight_slow";
+
+    /** remotejoystick 开始调用车辆设备发送器的次数 */
+    public static final String METRIC_REMOTE_JOYSTICK_SEND_STARTED = "parallel_driving.remotejoystick.send_started";
+
     public void recordRemoteJoystickDedupDropped(String cockpitId) {
         if (registry == null) {
             return;
         }
-        registry.counter(METRIC_REMOTE_JOYSTICK_DEDUP_DROPPED,
-                "cockpit", cockpitId != null ? cockpitId : "unknown")
-            .increment();
+        remoteJoystickDedupDropped.increment();
     }
 
     public void recordRemoteJoystickMailboxCoalesced(String cockpitId, String vehicleId) {
         if (registry == null) {
             return;
         }
-        registry.counter(METRIC_REMOTE_JOYSTICK_MAILBOX_COALESCED,
-                "cockpit", cockpitId != null ? cockpitId : "unknown",
-                "vehicle", vehicleId != null ? vehicleId : "unknown")
-            .increment();
+        remoteJoystickMailboxCoalesced.increment();
+    }
+
+    public void remoteJoystickSendStarted() {
+        if (registry == null) {
+            return;
+        }
+        remoteJoystickInflightSends.incrementAndGet();
+    }
+
+    public void recordRemoteJoystickSendStarted(String cockpitId, String vehicleId) {
+        if (registry == null) {
+            return;
+        }
+        remoteJoystickSendStarted.increment();
+        remoteJoystickInflightSends.incrementAndGet();
+    }
+
+    public void remoteJoystickSendFinished() {
+        if (registry == null) {
+            return;
+        }
+        remoteJoystickInflightSends.updateAndGet(current -> Math.max(0, current - 1));
+    }
+
+    public void recordRemoteJoystickMailboxPendingAge(String cockpitId, String vehicleId, long durationMs) {
+        if (registry == null) {
+            return;
+        }
+        remoteJoystickMailboxPendingAge.record(Math.max(0, durationMs), TimeUnit.MILLISECONDS);
+    }
+
+    public void recordRemoteJoystickSendCompletion(String cockpitId,
+                                                   String vehicleId,
+                                                   long durationMs,
+                                                   String result) {
+        if (registry == null) {
+            return;
+        }
+        timerForCompletion(result).record(Math.max(0, durationMs), TimeUnit.MILLISECONDS);
+    }
+
+    public void recordRemoteJoystickInflightSlow(String cockpitId, String vehicleId, long durationMs) {
+        if (registry == null) {
+            return;
+        }
+        remoteJoystickInflightSlow.increment();
+        remoteJoystickInflightSlowDuration.record(
+            Math.max(0, durationMs), TimeUnit.MILLISECONDS);
+    }
+
+    private Timer timerForCompletion(String result) {
+        if ("on_complete".equals(result)) {
+            return remoteJoystickSendCompletionOnComplete;
+        }
+        if ("on_error".equals(result)) {
+            return remoteJoystickSendCompletionOnError;
+        }
+        if ("cancel".equals(result)) {
+            return remoteJoystickSendCompletionCancel;
+        }
+        return remoteJoystickSendCompletionOther;
     }
 
     public void statusWebSocketOpened() {

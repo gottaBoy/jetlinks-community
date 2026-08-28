@@ -10,10 +10,13 @@ import org.jetlinks.core.device.DeviceRegistry;
 import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.core.message.Headers;
 import reactor.core.publisher.Mono;
+import org.reactivestreams.Subscription;
 
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 平行驾驶房间
@@ -32,9 +35,9 @@ public class ParallelDrivingRoom {
     private DeviceOperator cockpitDevice;
     private DeviceOperator vehicleDevice;
     
-    private ParallelDrivingSessionState state;
+    private volatile ParallelDrivingSessionState state;
     private long createTime;
-    private long lastActiveTime;
+    private volatile long lastActiveTime;
     
     // 消息统计
     private final AtomicLong cockpitToVehicleMessages = new AtomicLong(0);
@@ -53,14 +56,46 @@ public class ParallelDrivingRoom {
 
     /** latest-only 信箱开关（parallel-driving.control.latest-only，默认 false 保持原行为） */
     private volatile boolean latestOnlyEnabled = false;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
     /** remotejoystick latest-only 信箱：待发的最新一帧（覆盖式） */
-    private final AtomicReference<DeviceMessage> pendingRemoteJoystick = new AtomicReference<>();
+    private final AtomicReference<PendingRemoteJoystick> pendingRemoteJoystick = new AtomicReference<>();
     /** 单飞标记：是否已有帧在途 */
     private final AtomicBoolean remoteJoystickSending = new AtomicBoolean(false);
     /** latest-only 信箱合并(旧帧被覆盖)计数，@Getter 暴露 */
     private final AtomicLong coalescedRemoteJoystickMessages = new AtomicLong(0);
+    /** 当前在途帧开始时间和消息标识，用于识别 sendAndForget/socket write 长时间不完成。 */
+    private final AtomicLong remoteJoystickInFlightStartedNanos = new AtomicLong(0);
+    private final AtomicReference<String> remoteJoystickInFlightMessageId = new AtomicReference<>();
+    private final AtomicReference<String> remoteJoystickInFlightSequence = new AtomicReference<>();
+    private final AtomicReference<String> remoteJoystickInFlightCorrelationId = new AtomicReference<>();
+    /** 关闭房间时取消在途发送，避免发送器卡住后继续持有连接/消息。 */
+    private final AtomicReference<Subscription> remoteJoystickInFlightSubscription = new AtomicReference<>();
+    /** Protects the latest-only mailbox lifecycle against late Reactor callbacks and close(). */
+    private final Object remoteJoystickStateLock = new Object();
+    private long remoteJoystickGeneration;
+    private long remoteJoystickInFlightGeneration;
+    /** 慢发送告警限频。 */
+    private final AtomicLong lastRemoteJoystickSlowWarningNanos = new AtomicLong(0);
+    private static final long REMOTE_JOYSTICK_SLOW_INFLIGHT_NANOS = TimeUnit.MILLISECONDS.toNanos(300);
+    private static final long REMOTE_JOYSTICK_SLOW_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
+    /**
+     * Must stay below the vehicle MRC window (300ms + 100ms * 5 ~= 800ms).
+     * A stuck send must release the latest-only slot before it can suppress
+     * subsequent joystick frames for the whole safety window.
+     */
+    private static final Duration REMOTE_JOYSTICK_SEND_TIMEOUT = Duration.ofMillis(700);
     /** 指标记录器（可选注入，null 时跳过埋点） */
     private volatile ParallelDrivingLatencyMetrics latencyMetrics;
+
+    private static final class PendingRemoteJoystick {
+        private final DeviceMessage message;
+        private final long enqueuedAtNanos;
+
+        private PendingRemoteJoystick(DeviceMessage message, long enqueuedAtNanos) {
+            this.message = message;
+            this.enqueuedAtNanos = enqueuedAtNanos;
+        }
+    }
     
     public ParallelDrivingRoom(String cockpitDeviceId, String vehicleDeviceId) {
         this.roomId = cockpitDeviceId + "-" + vehicleDeviceId;
@@ -133,10 +168,18 @@ public class ParallelDrivingRoom {
      * @return Mono<Void>
      */
     public reactor.core.publisher.Mono<Void> forwardCockpitToVehicle(DeviceMessage message) {
-        if (latestOnlyEnabled && isRemoteJoystickMessage(message)) {
-            return forwardRemoteJoystickLatestOnly(message);
-        }
-        return forwardCockpitToVehicleDirect(message);
+        // Keep the public API cold: mailbox state and message construction must
+        // happen only after the caller subscribes. Otherwise a cancelled or
+        // never-subscribed Mono can occupy the latest-only slot indefinitely.
+        return Mono.defer(() -> {
+            if (closed.get() || !isActive()) {
+                return Mono.error(new IllegalStateException("平行驾驶房间已关闭或未激活: " + roomId));
+            }
+            if (latestOnlyEnabled && isRemoteJoystickMessage(message)) {
+                return forwardRemoteJoystickLatestOnly(message);
+            }
+            return forwardCockpitToVehicleDirect(message);
+        });
     }
 
     private static boolean isRemoteJoystickMessage(DeviceMessage message) {
@@ -146,35 +189,180 @@ public class ParallelDrivingRoom {
 
     /** latest-only 信箱：同一时刻最多一帧在途；新帧覆盖待发帧，发完只补发最新的，跳过中间旧帧。 */
     private reactor.core.publisher.Mono<Void> forwardRemoteJoystickLatestOnly(DeviceMessage message) {
-        DeviceMessage replaced = pendingRemoteJoystick.getAndSet(message);
+        long nowNanos = System.nanoTime();
+        PendingRemoteJoystick pending = new PendingRemoteJoystick(message, nowNanos);
+        PendingRemoteJoystick replaced;
+        boolean shouldDrain;
+        synchronized (remoteJoystickStateLock) {
+            if (closed.get()) {
+                return Mono.error(new IllegalStateException("平行驾驶房间已关闭: " + roomId));
+            }
+            replaced = pendingRemoteJoystick.getAndSet(pending);
+            shouldDrain = !remoteJoystickSending.getAndSet(true);
+        }
         if (replaced != null) {
             coalescedRemoteJoystickMessages.incrementAndGet();
             if (latencyMetrics != null) {
                 latencyMetrics.recordRemoteJoystickMailboxCoalesced(cockpitDeviceId, vehicleDeviceId);
             }
         }
-        if (!remoteJoystickSending.compareAndSet(false, true)) {
+        if (!shouldDrain) {
+            observeSlowRemoteJoystickInFlight(message, nowNanos);
             return reactor.core.publisher.Mono.empty();
         }
         return drainRemoteJoystick();
     }
 
     private reactor.core.publisher.Mono<Void> drainRemoteJoystick() {
-        DeviceMessage next = pendingRemoteJoystick.getAndSet(null);
-        if (next == null) {
-            remoteJoystickSending.set(false);
+        PendingRemoteJoystick pending;
+        long generation = 0;
+        boolean retry;
+        synchronized (remoteJoystickStateLock) {
+            if (closed.get()) {
+                remoteJoystickSending.set(false);
+                pendingRemoteJoystick.set(null);
+                return reactor.core.publisher.Mono.empty();
+            }
+            pending = pendingRemoteJoystick.getAndSet(null);
+            retry = pending == null && pendingRemoteJoystick.get() != null;
+            if (pending == null) {
+                // Re-check while holding the same lock as enqueue. A frame
+                // cannot be inserted between clearing the slot and releasing
+                // the single-flight flag.
+                if (retry) {
+                    remoteJoystickSending.set(true);
+                } else {
+                    remoteJoystickSending.set(false);
+                }
+            } else {
+                generation = ++remoteJoystickGeneration;
+                remoteJoystickInFlightGeneration = generation;
+            }
+        }
+        if (retry) {
+            return drainRemoteJoystick();
+        }
+        if (pending == null) {
             return reactor.core.publisher.Mono.empty();
         }
+        final long sendGeneration = generation;
+        DeviceMessage next = pending.message;
+        long sendStartedNanos = System.nanoTime();
+        long pendingAgeMs = TimeUnit.NANOSECONDS.toMillis(
+            Math.max(0, sendStartedNanos - pending.enqueuedAtNanos));
+        String messageId = next.getMessageId();
+        String sequence = remoteJoystickSequence(next);
+        String correlationId = next.getHeader("correlationId")
+            .map(String::valueOf)
+            .orElse(messageId);
+        remoteJoystickInFlightStartedNanos.set(sendStartedNanos);
+        remoteJoystickInFlightMessageId.set(messageId);
+        remoteJoystickInFlightSequence.set(sequence);
+        remoteJoystickInFlightCorrelationId.set(correlationId);
+        if (latencyMetrics != null) {
+            latencyMetrics.recordRemoteJoystickSendStarted(cockpitDeviceId, vehicleDeviceId);
+            latencyMetrics.recordRemoteJoystickMailboxPendingAge(
+                cockpitDeviceId, vehicleDeviceId, pendingAgeMs);
+        }
+        log.debug("[remotejoystick-observation] send_start roomId={} cockpit={} vehicle={} "
+                + "messageId={} seq={} correlationId={} pendingAgeMs={} coalescedTotal={}",
+            roomId, cockpitDeviceId, vehicleDeviceId, messageId, sequence, correlationId,
+            pendingAgeMs, coalescedRemoteJoystickMessages.get());
+        if (pendingAgeMs >= TimeUnit.NANOSECONDS.toMillis(REMOTE_JOYSTICK_SLOW_INFLIGHT_NANOS)) {
+            log.warn("[remotejoystick-observation] pending_slow roomId={} cockpit={} vehicle={} "
+                    + "messageId={} seq={} correlationId={} pendingAgeMs={} coalescedTotal={}",
+                roomId, cockpitDeviceId, vehicleDeviceId, messageId, sequence, correlationId,
+                pendingAgeMs, coalescedRemoteJoystickMessages.get());
+        }
         return forwardCockpitToVehicleDirect(next)
+            .timeout(REMOTE_JOYSTICK_SEND_TIMEOUT)
+            .doOnSubscribe(subscription -> {
+                boolean cancel;
+                synchronized (remoteJoystickStateLock) {
+                    cancel = closed.get() || remoteJoystickInFlightGeneration != sendGeneration;
+                    if (!cancel) {
+                        remoteJoystickInFlightSubscription.set(subscription);
+                    }
+                }
+                if (cancel) {
+                    subscription.cancel();
+                }
+            })
             .doFinally(s -> {
-                remoteJoystickSending.set(false);
-                if (pendingRemoteJoystick.get() != null
-                    && remoteJoystickSending.compareAndSet(false, true)) {
+                long sendDurationMs = TimeUnit.NANOSECONDS.toMillis(
+                    Math.max(0, System.nanoTime() - sendStartedNanos));
+                if (latencyMetrics != null) {
+                    latencyMetrics.recordRemoteJoystickSendCompletion(
+                        cockpitDeviceId, vehicleDeviceId, sendDurationMs, s.name().toLowerCase());
+                    latencyMetrics.remoteJoystickSendFinished();
+                }
+                if (sendDurationMs >= TimeUnit.NANOSECONDS.toMillis(REMOTE_JOYSTICK_SLOW_INFLIGHT_NANOS)) {
+                    log.warn("[remotejoystick-observation] send_completed_slow roomId={} cockpit={} vehicle={} messageId={} seq={} correlationId={} pendingAgeMs={} sendDurationMs={} result={} coalescedTotal={}",
+                        roomId, cockpitDeviceId, vehicleDeviceId, messageId, sequence, correlationId,
+                        pendingAgeMs, sendDurationMs, s.name(), coalescedRemoteJoystickMessages.get());
+                }
+                boolean shouldDrain = false;
+                synchronized (remoteJoystickStateLock) {
+                    if (remoteJoystickInFlightGeneration == sendGeneration) {
+                        remoteJoystickInFlightGeneration = 0;
+                        remoteJoystickInFlightStartedNanos.set(0);
+                        remoteJoystickInFlightMessageId.set(null);
+                        remoteJoystickInFlightSequence.set(null);
+                        remoteJoystickInFlightCorrelationId.set(null);
+                        remoteJoystickInFlightSubscription.set(null);
+                        remoteJoystickSending.set(false);
+                        if (!closed.get() && pendingRemoteJoystick.get() != null) {
+                            remoteJoystickSending.set(true);
+                            shouldDrain = true;
+                        }
+                    }
+                }
+                if (shouldDrain) {
                     drainRemoteJoystick().subscribe(
                         null,
                         e -> log.error("[驾驶舱->云端->车辆] remotejoystick 信箱 drain 失败: {}", e.getMessage()));
                 }
             });
+    }
+
+    private void observeSlowRemoteJoystickInFlight(DeviceMessage pending, long nowNanos) {
+        long inFlightStartedNanos = remoteJoystickInFlightStartedNanos.get();
+        if (inFlightStartedNanos <= 0) {
+            return;
+        }
+        long inFlightAgeNanos = nowNanos - inFlightStartedNanos;
+        if (inFlightAgeNanos < REMOTE_JOYSTICK_SLOW_INFLIGHT_NANOS) {
+            return;
+        }
+        long previousWarningNanos = lastRemoteJoystickSlowWarningNanos.get();
+        if (nowNanos - previousWarningNanos < REMOTE_JOYSTICK_SLOW_WARNING_INTERVAL_NANOS
+            || !lastRemoteJoystickSlowWarningNanos.compareAndSet(previousWarningNanos, nowNanos)) {
+            return;
+        }
+        long inFlightAgeMs = TimeUnit.NANOSECONDS.toMillis(inFlightAgeNanos);
+        if (latencyMetrics != null) {
+            latencyMetrics.recordRemoteJoystickInflightSlow(
+                cockpitDeviceId, vehicleDeviceId, inFlightAgeMs);
+        }
+        String pendingMessageId = pending.getMessageId();
+        String pendingCorrelationId = pending.getHeader("correlationId")
+            .map(String::valueOf)
+            .orElse(pendingMessageId);
+        log.warn("[remotejoystick-observation] inflight_slow roomId={} cockpit={} vehicle={} inFlightMessageId={} inFlightSeq={} inFlightCorrelationId={} pendingMessageId={} pendingSeq={} pendingCorrelationId={} inFlightAgeMs={} coalescedTotal={}",
+            roomId, cockpitDeviceId, vehicleDeviceId, remoteJoystickInFlightMessageId.get(),
+            remoteJoystickInFlightSequence.get(), remoteJoystickInFlightCorrelationId.get(),
+            pendingMessageId, remoteJoystickSequence(pending), pendingCorrelationId,
+            inFlightAgeMs, coalescedRemoteJoystickMessages.get());
+    }
+
+    private static String remoteJoystickSequence(DeviceMessage message) {
+        if (message instanceof org.jetlinks.core.message.function.FunctionInvokeMessage) {
+            Object sequence = ((org.jetlinks.core.message.function.FunctionInvokeMessage) message).getInput("seq");
+            if (sequence != null) {
+                return String.valueOf(sequence);
+            }
+        }
+        return message.getHeader("seq").map(String::valueOf).orElse("unknown");
     }
 
     private reactor.core.publisher.Mono<Void> forwardCockpitToVehicleDirect(DeviceMessage message) {
@@ -392,9 +580,14 @@ public class ParallelDrivingRoom {
                 roomId, vehicleDeviceId);
         }
         
-        // 查询车辆设备的加密状态（用于日志和监控）
-        // 注意：实际的加密/解密由协议编解码器自动处理，这里只是查询状态用于日志
-        if (encryptionService != null) {
+        boolean isRemoteJoystick = forwarded instanceof org.jetlinks.core.message.function.FunctionInvokeMessage
+            && "remotejoystick".equals(
+                ((org.jetlinks.core.message.function.FunctionInvokeMessage) forwarded).getFunctionId());
+
+        // 查询车辆设备的加密状态（用于日志和监控）。
+        // remotejoystick 是高频热路径，跳过仅用于日志的异步查询，避免每帧创建
+        // Reactor 链和数据库/缓存访问；协议编解码器仍负责实际加解密。
+        if (!isRemoteJoystick && encryptionService != null) {
             encryptionService.isEncryptionSupported(vehicleDeviceId)
                 .doOnNext(enabled -> {
                     if (enabled) {
@@ -439,8 +632,6 @@ public class ParallelDrivingRoom {
         
         // 每次转发时从注册表重新获取车辆设备，避免车端重启后使用过期会话导致收不到消息
         // remotejoystick 高频：缓存 device 1 秒，减少 getDevice 调用
-        boolean isRemoteJoystick = forwarded instanceof org.jetlinks.core.message.function.FunctionInvokeMessage
-            && "remotejoystick".equals(((org.jetlinks.core.message.function.FunctionInvokeMessage) forwarded).getFunctionId());
         Mono<DeviceOperator> deviceSource;
         if (isRemoteJoystick && (System.currentTimeMillis() - cachedVehicleDeviceTime) < DEVICE_CACHE_TTL_MS) {
             DeviceOperator cached = cachedVehicleDevice.get();
@@ -631,14 +822,14 @@ public class ParallelDrivingRoom {
             org.jetlinks.core.message.function.FunctionInvokeMessage funcMsg = 
                 (org.jetlinks.core.message.function.FunctionInvokeMessage) forwarded;
             if ("remotejoystick".equals(funcMsg.getFunctionId())) {
-                log.info("[车辆->云端->驾驶舱] 房间[{}]准备转发 remotejoystick 给驾驶舱: vehicle={} -> cockpit={}, messageId={}", 
+                log.debug("[车辆->云端->驾驶舱] 房间[{}]准备转发 remotejoystick 给驾驶舱: vehicle={} -> cockpit={}, messageId={}", 
                     roomId, vehicleDeviceId, cockpitDeviceId, forwarded.getMessageId());
                 return cockpitDevice.messageSender()
                     .sendAndForget(forwarded)
                     .doOnSuccess(v -> {
                         vehicleToCockpitMessages.incrementAndGet();
                         lastActiveTime = System.currentTimeMillis();
-                        log.info("[车辆->云端->驾驶舱] 房间[{}]转发 remotejoystick 成功: vehicle={} -> cockpit={}", 
+                        log.debug("[车辆->云端->驾驶舱] 房间[{}]转发 remotejoystick 成功: vehicle={} -> cockpit={}", 
                             roomId, vehicleDeviceId, cockpitDeviceId);
                     })
                     .doOnError(error -> log.error("[车辆->云端->驾驶舱] 房间[{}]转发 remotejoystick 失败: messageId={}", 
@@ -692,9 +883,10 @@ public class ParallelDrivingRoom {
      * @return 是否活跃
      */
     public boolean isActive() {
-        return state == ParallelDrivingSessionState.ACTIVE &&
+        return !closed.get() &&
+               state == ParallelDrivingSessionState.ACTIVE &&
                cockpitDevice != null &&
-               vehicleDevice != null;
+               (vehicleDevice != null || deviceRegistry != null);
     }
     
     /**
@@ -703,6 +895,24 @@ public class ParallelDrivingRoom {
      * @return Mono<Void>
      */
     public reactor.core.publisher.Mono<Void> close() {
+        if (!closed.compareAndSet(false, true)) {
+            return reactor.core.publisher.Mono.empty();
+        }
+        Subscription inFlight;
+        synchronized (remoteJoystickStateLock) {
+            // Invalidate callbacks that were already scheduled by Reactor.
+            remoteJoystickInFlightGeneration = ++remoteJoystickGeneration;
+            inFlight = remoteJoystickInFlightSubscription.getAndSet(null);
+            pendingRemoteJoystick.set(null);
+            remoteJoystickInFlightStartedNanos.set(0);
+            remoteJoystickInFlightMessageId.set(null);
+            remoteJoystickInFlightSequence.set(null);
+            remoteJoystickInFlightCorrelationId.set(null);
+            remoteJoystickSending.set(false);
+        }
+        if (inFlight != null) {
+            inFlight.cancel();
+        }
         this.state = ParallelDrivingSessionState.RELEASED;
         log.info("房间[{}]已关闭: cockpit={}, vehicle={}, " +
                 "cockpitToVehicle={}, vehicleToCockpit={}", 

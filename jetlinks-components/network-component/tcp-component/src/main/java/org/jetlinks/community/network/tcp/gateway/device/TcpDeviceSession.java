@@ -22,7 +22,6 @@ import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.message.codec.EncodedMessage;
 import org.jetlinks.core.message.codec.Transport;
 import org.jetlinks.core.server.session.DeviceSession;
-import org.jetlinks.community.gateway.monitor.DeviceGatewayMonitor;
 import org.jetlinks.community.network.tcp.TcpMessage;
 import org.jetlinks.community.network.tcp.client.TcpClient;
 import reactor.core.publisher.Mono;
@@ -39,7 +38,6 @@ class TcpDeviceSession implements DeviceSession {
     @Setter
     private DeviceOperator operator;
 
-    @Setter
     private TcpClient client;
 
     @Getter
@@ -59,6 +57,7 @@ class TcpDeviceSession implements DeviceSession {
         this.client = client;
         this.transport = transport;
         this.monitor=monitor;
+        client.setDeviceId(operator.getDeviceId());
     }
 
     @Override
@@ -69,6 +68,11 @@ class TcpDeviceSession implements DeviceSession {
     @Override
     public String getDeviceId() {
         return operator.getDeviceId();
+    }
+
+    public void setClient(TcpClient client) {
+        this.client = client;
+        client.setDeviceId(getDeviceId());
     }
 
     @Override

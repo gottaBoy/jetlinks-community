@@ -42,9 +42,13 @@ public class ParallelDrivingMessageRouter {
     private static final long DEDUP_TTL_MS = 5000;
     private static final int DEDUP_MAX_SIZE = 10000;
 
-    /** remotejoystick 专用调度器：32 线程、10 万队列，与默认 boundedElastic 隔离，支撑 10Hz+ 高频转发 */
+    /**
+     * Small bounded scheduler for the remotejoystick adapter path. The room
+     * mailbox is latest-only, so a large queue would preserve stale commands
+     * and turn overload into delayed bursts.
+     */
     private static final Scheduler REMOTE_JOYSTICK_SCHEDULER = Schedulers.newBoundedElastic(
-        32, 100_000, "remotejoystick", 60);
+        4, 256, "remotejoystick", 60);
 
     /** remotejoystick 重复帧去重开关（parallel-driving.control.dedup，默认 false） */
     @Value("${parallel-driving.control.dedup:false}")
@@ -125,7 +129,7 @@ public class ParallelDrivingMessageRouter {
                             msg.getDeviceId(), msg.getMessageType(), msg.getMessageId());
                     }
                 })
-                .publishOn(Schedulers.parallel(), 512)  // 大 prefetch，减少 EventBus 背压丢包
+                .publishOn(Schedulers.parallel(), 64)
                 .flatMap(msg -> {
                     boolean isRemoteJoystick = msg instanceof FunctionInvokeMessage
                         && "remotejoystick".equals(((FunctionInvokeMessage) msg).getFunctionId());
@@ -163,7 +167,7 @@ public class ParallelDrivingMessageRouter {
                                 msg.getDeviceId(), error.getMessage());
                             return handleCockpitControlMessage(msg);
                         });
-                }, 128, 512)  // remotejoystick 高并发：128 并发 + 512 prefetch，支撑 10Hz+ 高频
+                }, 32, 32)
                 .onErrorContinue((error, obj) -> log.error("[驾驶舱->云端] 处理驾驶舱消息失败", error)),
             eventBus.subscribe(vehicleSubscription, DeviceMessage.class)
                 .doOnNext(msg -> {
@@ -199,10 +203,12 @@ public class ParallelDrivingMessageRouter {
                         FunctionInvokeMessage inv = (FunctionInvokeMessage) msg;
                         if ("cloudLinkPing".equals(inv.getFunctionId())) {
                             long serverReceiveTimeMs = System.currentTimeMillis();
+                            long serverReceiveTimeNanos = System.nanoTime();
                             Object clientTs = inv.getInput("clientSendTimeMs");
                             log.info("[cloudLinkPing] recv_ping deviceId={} requestMessageId={} clientSendTimeMs={} serverReceiveTimeMs={}",
                                 inv.getDeviceId(), inv.getMessageId(), clientTs, serverReceiveTimeMs);
-                            return customMessageHandler.replyToCloudLinkPing(inv, serverReceiveTimeMs);
+                            return customMessageHandler.replyToCloudLinkPing(
+                                inv, serverReceiveTimeMs, serverReceiveTimeNanos);
                         }
                     }
                     if (isDuplicate(msg.getMessageId())) {
@@ -485,4 +491,3 @@ public class ParallelDrivingMessageRouter {
             });
     }
 }
-
