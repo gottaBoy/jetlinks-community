@@ -35,14 +35,14 @@ public class ParallelDrivingRoomManager {
      * since the close operation started. This prevents an old asynchronous
      * close from deleting a newly-created room for the same device pair.
      */
-    private static final RedisScript<Object> CLOSE_ROOM_SCRIPT = RedisScript.of(
+    private static final RedisScript<Long> CLOSE_ROOM_SCRIPT = RedisScript.of(
         "local current = redis.call('GET', KEYS[1])\n" +
         "local cockpit = redis.call('GET', KEYS[2])\n" +
         "local vehicle = redis.call('GET', KEYS[3])\n" +
         "if current == ARGV[1] and cockpit == ARGV[2] and vehicle == ARGV[2] then\n" +
         "  return redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])\n" +
         "end\n" +
-        "return 0\n", Object.class);
+        "return 0\n", Long.class);
 
     private final DeviceRegistry deviceRegistry;
     private final ParallelDrivingEncryptionService encryptionService;
