@@ -6,6 +6,7 @@ import org.hswebframework.web.exception.BusinessException;
 import org.hswebframework.web.exception.NotFoundException;
 import org.jetlinks.community.parallel.driving.entity.ParallelDrivingSession;
 import org.jetlinks.community.parallel.driving.message.ParallelDrivingControlMessage;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoom;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager;
 import org.jetlinks.core.message.Headers;
@@ -31,6 +32,7 @@ public class ParallelDrivingControlService {
     private final ParallelDrivingRelationService relationService;
     private final ParallelDrivingRoomManager roomManager;
     private final ParallelDrivingControlLogService logService;
+    private final ParallelDrivingLatencyMetrics latencyMetrics;
     
     /**
      * 发送控制指令到车辆
@@ -48,19 +50,19 @@ public class ParallelDrivingControlService {
             controlMessage.getControlType());
         
         // 1. 验证设备存在
-        return Mono.zip(
+        Mono<Void> operation = Mono.zip(
             deviceRegistry.getDevice(cockpitDeviceId)
                 .switchIfEmpty(Mono.error(new NotFoundException("驾驶舱设备不存在"))),
             deviceRegistry.getDevice(vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new NotFoundException("车辆设备不存在")))
         )
         // 2. 验证会话状态并获取房间
-        .then(Mono.zip(
+        .then(latencyMetrics.observeControlStage("control", "session_room_lookup", Mono.zip(
             waitActiveSession(cockpitDeviceId, vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new BusinessException("会话不存在或未激活"))),
             roomManager.getRoom(cockpitDeviceId, vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new BusinessException("房间不存在或未激活")))
-        ))
+        )))
         .flatMap(tuple -> {
             ParallelDrivingSession session = tuple.getT1();
             ParallelDrivingRoom room = tuple.getT2();
@@ -92,7 +94,11 @@ public class ParallelDrivingControlService {
             controlMessage.prepareInputs();
 
             // 6. 通过房间转发消息（自动处理加密）
-            return room.forwardCockpitToVehicle(controlMessage);
+            return latencyMetrics.observeControlStage(
+                "control",
+                "forward",
+                room.forwardCockpitToVehicle(controlMessage)
+            );
         })
         // 7. 更新最后活动时间
         .then(relationService.updateLastActiveTime(cockpitDeviceId, vehicleDeviceId))
@@ -108,6 +114,7 @@ public class ParallelDrivingControlService {
             logService.logControlCommand(cockpitDeviceId, vehicleDeviceId, controlMessage, false, 
                 error.getMessage());
         });
+        return latencyMetrics.observeControlOperation("control", operation);
     }
     
     /**

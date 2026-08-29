@@ -251,6 +251,24 @@ system:
                     -   key: apiKey # 配置id
                         name: 高德地图ApiKey # 名称
 management:
+    server:
+        # 默认只允许本机采集；跨主机 Prometheus/Collector 采集时设置为 0.0.0.0。
+        address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+        port: ${MANAGEMENT_SERVER_PORT:${server.port}}
+    endpoints:
+        web:
+            exposure:
+                include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE:health,info,prometheus}
+    endpoint:
+        prometheus:
+            access: read_only
+    metrics:
+        export:
+            prometheus:
+                enabled: ${MANAGEMENT_METRICS_EXPORT_PROMETHEUS_ENABLED:false}
+        tags:
+            application: ${spring.application.name}
+            node: ${JETLINKS_SERVER_ID:${spring.application.name}}
     health:
         elasticsearch:
             enabled: false

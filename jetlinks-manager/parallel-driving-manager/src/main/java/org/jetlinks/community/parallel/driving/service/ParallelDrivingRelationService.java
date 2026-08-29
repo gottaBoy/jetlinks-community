@@ -10,6 +10,7 @@ import org.hswebframework.web.exception.NotFoundException;
 import org.jetlinks.community.parallel.driving.entity.ParallelDrivingBinding;
 import org.jetlinks.community.parallel.driving.entity.ParallelDrivingSession;
 import org.jetlinks.community.parallel.driving.enums.ParallelDrivingSessionState;
+import org.jetlinks.community.parallel.driving.metrics.ParallelDrivingLatencyMetrics;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
 import org.hswebframework.ezorm.rdb.operator.dml.query.SortOrder;
@@ -45,6 +46,7 @@ public class ParallelDrivingRelationService {
     private final DeviceRegistry deviceRegistry;
     private final org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager roomManager;
     private final ReactiveRedisTemplate<Object, Object> redis;
+    private final ParallelDrivingLatencyMetrics latencyMetrics;
 
     private static final String TAKEOVER_LOCK_PREFIX = "pd:lock:vehicle:";
     private static final Duration TAKEOVER_LOCK_TTL = Duration.ofSeconds(30);
@@ -54,12 +56,14 @@ public class ParallelDrivingRelationService {
                                          ReactiveRepository<ParallelDrivingSession, String> sessionRepository,
                                          DeviceRegistry deviceRegistry,
                                          org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager roomManager,
-                                         ReactiveRedisTemplate<Object, Object> redis) {
+                                         ReactiveRedisTemplate<Object, Object> redis,
+                                         ParallelDrivingLatencyMetrics latencyMetrics) {
         this.bindingRepository = bindingRepository;
         this.sessionRepository = sessionRepository;
         this.deviceRegistry = deviceRegistry;
         this.roomManager = roomManager;
         this.redis = redis;
+        this.latencyMetrics = latencyMetrics;
     }
 
     /**
@@ -75,7 +79,7 @@ public class ParallelDrivingRelationService {
         log.info("绑定驾驶舱到车端（授权关系）: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
 
         // 1. 验证设备存在和类型
-        return Mono.zip(
+        Mono<Void> operation = Mono.zip(
             deviceRegistry.getDevice(cockpitDeviceId),
             deviceRegistry.getDevice(vehicleDeviceId)
         )
@@ -94,6 +98,7 @@ public class ParallelDrivingRelationService {
         })
         .doOnSuccess(v -> log.info("绑定成功: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId))
         .doOnError(error -> log.error("绑定失败: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId, error));
+        return latencyMetrics.observeControlOperation("bind", operation);
     }
 
     /**
@@ -330,7 +335,7 @@ public class ParallelDrivingRelationService {
             cockpitDeviceId, vehicleDeviceId, force);
 
         // 1. 检查是否存在活跃会话
-        return checkControlPermission(cockpitDeviceId, vehicleDeviceId)
+        Mono<Void> operation = checkControlPermission(cockpitDeviceId, vehicleDeviceId)
             .flatMap(hasActiveSession -> {
                 if (hasActiveSession) {
                     if (!force) {
@@ -358,6 +363,7 @@ public class ParallelDrivingRelationService {
             .doOnSuccess(v -> log.info("解绑成功: cockpit={}, vehicle={}, force={}", cockpitDeviceId, vehicleDeviceId, force))
             .doOnError(error -> log.error("解绑失败: cockpit={}, vehicle={}, force={}",
                 cockpitDeviceId, vehicleDeviceId, force, error));
+        return latencyMetrics.observeControlOperation("unbind", operation);
     }
 
     /**
@@ -710,9 +716,14 @@ public class ParallelDrivingRelationService {
 
         String lockKey = TAKEOVER_LOCK_PREFIX + vehicleDeviceId;
 
-        return redis.opsForValue()
+        Mono<ParallelDrivingSession> operation = latencyMetrics.observeControlStage(
+            "takeover",
+            "redis_lock",
+            redis.opsForValue()
             .setIfAbsent(lockKey, cockpitDeviceId, TAKEOVER_LOCK_TTL)
+        )
             .flatMap(acquired -> {
+                latencyMetrics.recordRedisLock("takeover", Boolean.TRUE.equals(acquired));
                 if (!Boolean.TRUE.equals(acquired)) {
                     return Mono.error(new BusinessException(
                         "车辆[" + vehicleDeviceId + "]正在被其他驾驶舱接管中，请稍后重试"));
@@ -721,15 +732,20 @@ public class ParallelDrivingRelationService {
                 return doTakeover(cockpitDeviceId, vehicleDeviceId)
                     .doFinally(signal -> redis.delete(lockKey).subscribe());
             });
+        return latencyMetrics.observeControlOperation("takeover", operation);
     }
 
     private Mono<ParallelDrivingSession> doTakeover(String cockpitDeviceId, String vehicleDeviceId) {
         // 1. 验证设备存在和在线
-        return Mono.zip(
+        return latencyMetrics.observeControlStage(
+            "takeover",
+            "device_lookup",
+            Mono.zip(
             deviceRegistry.getDevice(cockpitDeviceId)
                 .switchIfEmpty(Mono.error(new NotFoundException("驾驶舱设备不存在"))),
             deviceRegistry.getDevice(vehicleDeviceId)
                 .switchIfEmpty(Mono.error(new NotFoundException("车辆设备不存在")))
+            )
         )
         .flatMap(tuple -> {
             DeviceOperator cockpit = tuple.getT1();
@@ -762,37 +778,46 @@ public class ParallelDrivingRelationService {
             });
         })
         // 5. 解除旧会话（如果存在）
-        .then(removeOldSessions(cockpitDeviceId, vehicleDeviceId))
+        .then(latencyMetrics.observeControlStage(
+            "takeover", "remove_old_sessions",
+            removeOldSessions(cockpitDeviceId, vehicleDeviceId)
+        ))
         // 5b. 清理同一驾驶舱-车辆的残留会话，避免旧 binding 干扰后续状态读取
-        .then(deleteSession(cockpitDeviceId, vehicleDeviceId))
+        .then(latencyMetrics.observeControlStage(
+            "takeover", "delete_stale_session",
+            deleteSession(cockpitDeviceId, vehicleDeviceId)
+        ))
         // 6. 创建新会话（状态：BINDING）
-        .then(createSession(cockpitDeviceId, vehicleDeviceId, ParallelDrivingSessionState.BINDING))
+        .then(latencyMetrics.observeControlStage(
+            "takeover", "create_session",
+            createSession(cockpitDeviceId, vehicleDeviceId, ParallelDrivingSessionState.BINDING)
+        ))
         // 7. 创建房间
-        .then(Mono.defer(() -> {
+        .then(latencyMetrics.observeControlStage("takeover", "create_room", Mono.defer(() -> {
             log.info("接管阶段[createRoom] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
             return roomManager.createRoom(cockpitDeviceId, vehicleDeviceId)
                 .doOnSuccess(room -> log.info("接管阶段[createRoom] 完成: roomId={}", room != null ? room.getRoomId() : null))
                 .then();
-        }))
+        })))
         // 8. 通知双方设备
-        .then(Mono.defer(() -> {
+        .then(latencyMetrics.observeControlStage("takeover", "notify_devices", Mono.defer(() -> {
             log.info("接管阶段[notifyDevicesTakeover] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
             return notifyDevicesTakeover(cockpitDeviceId, vehicleDeviceId)
                 .doOnSuccess(v -> log.info("接管阶段[notifyDevicesTakeover] 完成: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId));
-        }))
+        })))
         // 9. 更新状态为 ACTIVE
-        .then(Mono.defer(() -> {
+        .then(latencyMetrics.observeControlStage("takeover", "update_session_state", Mono.defer(() -> {
             log.info("接管阶段[updateSessionState->ACTIVE] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
             return updateSessionState(cockpitDeviceId, vehicleDeviceId,
                                       ParallelDrivingSessionState.ACTIVE)
                 .doOnSuccess(v -> log.info("接管阶段[updateSessionState->ACTIVE] 完成: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId));
-        }))
-        .then(Mono.defer(() -> {
+        })))
+        .then(latencyMetrics.observeControlStage("takeover", "wait_active", Mono.defer(() -> {
             log.info("接管阶段[waitSessionActive] cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
             return waitSessionActive(cockpitDeviceId, vehicleDeviceId)
                 .doOnSuccess(session -> log.info("接管阶段[waitSessionActive] 完成: state={}",
                     session != null ? session.getState() : null));
-        }))
+        })))
         .doOnSuccess(session -> log.info("远程接管成功: cockpit={}, vehicle={}, state={}",
             cockpitDeviceId, vehicleDeviceId, session != null ? session.getSessionState() : null))
         .doOnError(error -> log.error("远程接管失败: cockpit={}, vehicle={}",
@@ -811,19 +836,32 @@ public class ParallelDrivingRelationService {
         log.info("开始释放控制: cockpit={}, vehicle={}", cockpitDeviceId, vehicleDeviceId);
 
         // 1. 关闭房间
-        return roomManager.closeRoom(cockpitDeviceId, vehicleDeviceId)
+        Mono<Void> operation = latencyMetrics.observeControlStage(
+            "release", "close_room",
+            roomManager.closeRoom(cockpitDeviceId, vehicleDeviceId)
+        )
             // 2. 更新状态为 RELEASING
-            .then(updateSessionState(cockpitDeviceId, vehicleDeviceId,
-                                     ParallelDrivingSessionState.RELEASING))
+            .then(latencyMetrics.observeControlStage(
+                "release", "update_session_state",
+                updateSessionState(cockpitDeviceId, vehicleDeviceId,
+                                    ParallelDrivingSessionState.RELEASING)
+            ))
             // 3. 通知双方设备
-            .then(notifyDevicesRelease(cockpitDeviceId, vehicleDeviceId))
+            .then(latencyMetrics.observeControlStage(
+                "release", "notify_devices",
+                notifyDevicesRelease(cockpitDeviceId, vehicleDeviceId)
+            ))
             // 4. 删除会话（绑定关系保留）
-            .then(deleteSession(cockpitDeviceId, vehicleDeviceId))
+            .then(latencyMetrics.observeControlStage(
+                "release", "delete_session",
+                deleteSession(cockpitDeviceId, vehicleDeviceId)
+            ))
             .then()
             .doOnSuccess(v -> log.info("释放控制成功: cockpit={}, vehicle={}",
                 cockpitDeviceId, vehicleDeviceId))
             .doOnError(error -> log.error("释放控制失败: cockpit={}, vehicle={}",
                 cockpitDeviceId, vehicleDeviceId, error));
+        return latencyMetrics.observeControlOperation("release", operation);
     }
 
     /**
@@ -957,4 +995,3 @@ public class ParallelDrivingRelationService {
             );
     }
 }
-
