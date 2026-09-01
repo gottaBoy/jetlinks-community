@@ -16,6 +16,7 @@
 package org.jetlinks.community.configure.trace;
 
 import io.opentelemetry.exporter.jaeger.JaegerGrpcSpanExporter;
+import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
 import io.opentelemetry.sdk.trace.SpanProcessor;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
@@ -43,8 +44,17 @@ public class TraceProperties {
     //记录跟踪信息到Jaeger
     private Jaeger jaeger;
 
+    //通过OTLP HTTP推送到DataBuff或OpenTelemetry Collector
+    private Otlp otlp = new Otlp();
+
     //打印跟踪信息到日志
     private Logging logging = new Logging();
+
+    private String serviceName;
+
+    private String serviceInstanceId;
+
+    private String deploymentEnvironment;
 
 
     public void setIgnoreSpans(Set<String> ignoreSpans) {
@@ -67,6 +77,9 @@ public class TraceProperties {
         List<SpanProcessor> processors = new ArrayList<>();
         if (jaeger != null && jaeger.isEnabled()) {
             processors.add(jaeger.create());
+        }
+        if (otlp != null && otlp.isEnabled()) {
+            processors.add(otlp.create());
         }
         return processors;
     }
@@ -95,6 +108,17 @@ public class TraceProperties {
         }
     }
 
+    public static class Otlp extends BatchProcessor {
+        @Override
+        protected SpanExporter createExporter() {
+            return OtlpHttpSpanExporter
+                .builder()
+                .setEndpoint(getEndpoint())
+                .setTimeout(getExporterTimeout())
+                .build();
+        }
+    }
+
     @Getter
     @Setter
     public abstract static class GrpcProcessor extends BatchProcessor {
@@ -117,7 +141,7 @@ public class TraceProperties {
         public SpanProcessor create() {
             return BatchSpanProcessor
                 .builder(createExporter())
-                .setScheduleDelay(100, TimeUnit.MILLISECONDS)
+                .setScheduleDelay(scheduleDelay.toMillis(), TimeUnit.MILLISECONDS)
                 .setMaxExportBatchSize(maxBatchSize)
                 .setMaxQueueSize(maxQueueSize)
                 .setExporterTimeout(exporterTimeout)

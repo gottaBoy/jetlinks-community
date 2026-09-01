@@ -34,6 +34,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.web.reactive.function.client.WebClientCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(TraceProperties.class)
@@ -56,15 +57,32 @@ public class TraceConfiguration {
     @Bean
     public OpenTelemetry createTelemetry(ObjectProvider<SpanProcessor> spanProcessors,
                                          ClusterProperties clusterProperties,
-                                         TraceProperties traceProperties) {
+                                         TraceProperties traceProperties,
+                                         Environment environment) {
         SdkTracerProviderBuilder sdkTracerProvider = SdkTracerProvider.builder();
         spanProcessors.forEach(sdkTracerProvider::addSpanProcessor);
         traceProperties.buildProcessors().forEach(sdkTracerProvider::addSpanProcessor);
+        String serviceName = firstNonBlank(
+            traceProperties.getServiceName(),
+            environment.getProperty("spring.application.name"),
+            clusterProperties.getId(),
+            "jetlinks");
+        Resource resource = Resource
+            .builder()
+            .put("service.name", serviceName)
+            .build();
+        if (hasText(traceProperties.getServiceInstanceId())) {
+            resource = resource.toBuilder()
+                .put("service.instance.id", traceProperties.getServiceInstanceId())
+                .build();
+        }
+        if (hasText(traceProperties.getDeploymentEnvironment())) {
+            resource = resource.toBuilder()
+                .put("deployment.environment", traceProperties.getDeploymentEnvironment())
+                .build();
+        }
         SdkTracerProvider tracerProvider = sdkTracerProvider
-            .setResource(Resource
-                             .builder()
-                             .put("service.name", clusterProperties.getId())
-                             .build())
+            .setResource(resource)
             .build();
 
         Runtime.getRuntime().addShutdownHook(new Thread(tracerProvider::close));
@@ -81,6 +99,19 @@ public class TraceConfiguration {
 
         }
         return telemetry;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (hasText(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     @Bean

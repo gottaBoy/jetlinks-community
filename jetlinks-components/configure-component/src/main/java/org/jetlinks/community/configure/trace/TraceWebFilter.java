@@ -15,7 +15,10 @@
  */
 package org.jetlinks.community.configure.trace;
 
+import io.opentelemetry.api.trace.SpanKind;
 import org.jetlinks.core.trace.MonoTracer;
+import org.jetlinks.core.trace.ReactiveSpan;
+import org.jetlinks.core.trace.ReactiveSpanBuilder;
 import org.jetlinks.core.trace.TraceHolder;
 import org.springframework.core.Ordered;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -23,6 +26,10 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+
+import java.net.InetSocketAddress;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 public class TraceWebFilter implements WebFilter, Ordered {
     @SuppressWarnings("all")
@@ -36,6 +43,33 @@ public class TraceWebFilter implements WebFilter, Ordered {
             .getRequest()
             .mutate();
 
+        BiConsumer<ReactiveSpan, Boolean> onComplete = (span, ignored) -> {
+            if (exchange.getResponse().getStatusCode() != null) {
+                span.setAttribute("http.status_code", exchange.getResponse().getStatusCode().value());
+                span.setAttribute(
+                    "http.response.status_code",
+                    exchange.getResponse().getStatusCode().value());
+            }
+        };
+        Consumer<ReactiveSpanBuilder> spanBuilder = builder -> {
+            builder
+                .setSpanKind(SpanKind.SERVER)
+                .setAttribute("http.method", exchange.getRequest().getMethod().name())
+                .setAttribute("http.request.method", exchange.getRequest().getMethod().name())
+                .setAttribute("http.url", exchange.getRequest().getURI().toString())
+                .setAttribute("url.full", exchange.getRequest().getURI().toString())
+                .setAttribute("http.route", exchange.getRequest().getPath().value())
+                .setAttribute("url.path", exchange.getRequest().getPath().value());
+
+            InetSocketAddress localAddress = exchange.getRequest().getLocalAddress();
+            if (localAddress != null) {
+                if (localAddress.getHostString() != null) {
+                    builder.setAttribute("server.address", localAddress.getHostString());
+                }
+                builder.setAttribute("server.port", localAddress.getPort());
+            }
+        };
+
         return TraceHolder
             //将追踪信息返回到响应头
             .writeContextTo(exchange.getResponse().getHeaders(), HttpHeaderTraceWriter.INSTANCE)
@@ -44,7 +78,12 @@ public class TraceWebFilter implements WebFilter, Ordered {
             //do filter
             .then(Mono.defer(() -> chain.filter(exchange.mutate().request(requestCopy.build()).build())))
             //创建跟踪信息
-            .as(MonoTracer.create(spanName))
+            .as(MonoTracer.<Void>create(
+                TraceHolder.appName(),
+                spanName,
+                null,
+                onComplete,
+                spanBuilder))
             //从请求头中追加上级跟踪信息
             .contextWrite(ctx -> {
                 return TraceHolder.readToContext(

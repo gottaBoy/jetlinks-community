@@ -169,7 +169,27 @@ class TcpServerDeviceGateway extends AbstractDeviceGateway implements DeviceGate
                     .handleDeviceMessage(msg)
                     .as(MonoTracer.create(
                         DeviceTracer.SpanName.decode(msg.getDeviceId()),
-                        (span, _msg) -> span.setAttributeLazy(DeviceTracer.SpanKey.message, _msg::toString))))
+                        (span, _msg) -> span
+                            .setAttribute(DeviceTracer.SpanKey.deviceIdSemantic, msg.getDeviceId())
+                            .setAttributeLazy(DeviceTracer.SpanKey.message, _msg::toString),
+                        builder -> {
+                            builder
+                                .setAttribute(
+                                    DeviceTracer.SpanKey.deviceIdSemantic,
+                                    msg.getDeviceId())
+                                .setAttribute(
+                                    DeviceTracer.SpanKey.networkPeerAddress,
+                                    address.getHostString())
+                                .setAttribute(
+                                    DeviceTracer.SpanKey.networkPeerPort,
+                                    (long) address.getPort());
+                            DeviceTracer.enrich(
+                                builder,
+                                DefaultTransport.TCP,
+                                message,
+                                "receive");
+                        }))
+                )
                 .onErrorResume((err) -> {
                     log.error("Handle TCP[{}] message failed:\n{}",
                               address,

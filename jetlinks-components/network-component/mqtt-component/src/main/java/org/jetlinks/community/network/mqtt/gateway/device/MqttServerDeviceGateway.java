@@ -36,6 +36,7 @@ import org.jetlinks.core.message.codec.*;
 import org.jetlinks.core.server.DeviceGatewayContext;
 import org.jetlinks.core.server.session.DeviceSession;
 import org.jetlinks.core.server.session.KeepOnlineSession;
+import org.jetlinks.core.trace.DeviceTracer;
 import org.jetlinks.core.trace.FluxTracer;
 import org.jetlinks.core.trace.MonoTracer;
 import org.jetlinks.supports.server.DecodedClientMessageHandler;
@@ -308,9 +309,33 @@ class MqttServerDeviceGateway extends AbstractDeviceGateway {
                     }
                     return this
                         .decodeAndHandleMessage(operator, session, publishing, connection)
-                        .as(MonoTracer
-                                .create(SpanName.upstream0(connection.getClientId()),
-                                        (span) -> span.setAttributeLazy(SpanKey.message, publishing::print)));
+                        .as(MonoTracer.<Void>create(
+                                SpanName.upstream0(connection.getClientId()).toString(),
+                                null,
+                                null,
+                                builder -> {
+                                            builder.setAttribute(
+                                                SpanKey.message,
+                                                publishing.print());
+                                            builder.setAttribute(
+                                                SpanKey.deviceIdSemantic,
+                                                operator.getDeviceId());
+                                            DeviceTracer.enrich(
+                                                builder,
+                                                getTransport(),
+                                                publishing,
+                                                "receive");
+                                            InetSocketAddress address = connection.getClientAddress();
+                                            if (address != null) {
+                                                builder
+                                                    .setAttribute(
+                                                        SpanKey.networkPeerAddress,
+                                                        address.getHostString())
+                                                    .setAttribute(
+                                                        SpanKey.networkPeerPort,
+                                                        (long) address.getPort());
+                                            }
+                                        }));
                 },
                 0
             )
@@ -355,7 +380,19 @@ class MqttServerDeviceGateway extends AbstractDeviceGateway {
             })
             .as(FluxTracer
                     .create(SpanName.decode(operator.getDeviceId()),
-                            (span, msg) -> span.setAttribute(SpanKey.message, toJsonString(msg.toJson()))))
+                            (span, msg) -> span
+                                .setAttribute(SpanKey.deviceIdSemantic, operator.getDeviceId())
+                                .setAttribute(SpanKey.message, toJsonString(msg.toJson())),
+                            builder -> {
+                                builder.setAttribute(
+                                    SpanKey.deviceIdSemantic,
+                                    operator.getDeviceId());
+                                DeviceTracer.enrich(
+                                    builder,
+                                    getTransport(),
+                                    message,
+                                    "receive");
+                            }))
             //发生错误不中断流
             .onErrorResume((err) -> {
                 log.error("handle mqtt message [{}] error:{}", operator.getDeviceId(), message, err);

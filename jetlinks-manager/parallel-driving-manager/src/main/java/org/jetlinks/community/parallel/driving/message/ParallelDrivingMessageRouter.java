@@ -11,6 +11,8 @@ import org.jetlinks.core.event.EventBus;
 import org.jetlinks.core.event.Subscription;
 import org.jetlinks.core.message.DeviceMessage;
 import org.jetlinks.core.message.function.FunctionInvokeMessage;
+import org.jetlinks.core.trace.DeviceTracer;
+import org.jetlinks.core.trace.MonoTracer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -388,7 +390,7 @@ public class ParallelDrivingMessageRouter {
                     });
             });
 
-        return hasPermission
+        Mono<Void> operation = hasPermission
             .filter(Boolean::booleanValue)
             .switchIfEmpty(Mono.error(new AccessDenyException("驾驶舱[" + cockpitDeviceId + "]无权限控制车端[" + finalTargetVehicleId + "]（既无活跃会话也无绑定关系）")))
             // 2. 获取或创建房间
@@ -417,6 +419,13 @@ public class ParallelDrivingMessageRouter {
                 log.error("[驾驶舱->云端->车辆] 处理驾驶舱控制指令失败", error);
                 return Mono.empty(); // 忽略错误，避免影响其他消息处理
             });
+        return traceMessage(
+            operation,
+            message,
+            "/parallel-driving/control/message",
+            "cockpit-to-vehicle",
+            finalTargetVehicleId,
+            functionId(message));
     }
 
     /**
@@ -465,7 +474,7 @@ public class ParallelDrivingMessageRouter {
         }
 
         // 1. 获取房间（通过车辆ID）
-        return roomManager.getRoomByVehicle(vehicleDeviceId)
+        Mono<Void> operation = roomManager.getRoomByVehicle(vehicleDeviceId)
             .switchIfEmpty(Mono.defer(() -> {
                 log.warn("[车辆->云端->驾驶舱] 车端功能调用回复：房间不存在，无法转发给驾驶舱: vehicle={}, functionId={}, messageId={}", 
                     vehicleDeviceId, reply.getFunctionId(), reply.getMessageId());
@@ -489,5 +498,50 @@ public class ParallelDrivingMessageRouter {
                     vehicleDeviceId, reply.getFunctionId(), reply.getMessageId(), error);
                 return Mono.empty(); // 忽略错误，避免影响其他消息处理
             });
+        return traceMessage(
+            operation,
+            reply,
+            "/parallel-driving/reply/vehicle-to-cockpit",
+            "vehicle-to-cockpit",
+            vehicleDeviceId,
+            functionId(reply));
+    }
+
+    private String functionId(DeviceMessage message) {
+        if (message instanceof FunctionInvokeMessage) {
+            return ((FunctionInvokeMessage) message).getFunctionId();
+        }
+        if (message instanceof org.jetlinks.core.message.function.FunctionInvokeMessageReply) {
+            return ((org.jetlinks.core.message.function.FunctionInvokeMessageReply) message).getFunctionId();
+        }
+        return message.getHeader("functionId").map(String::valueOf).orElse(null);
+    }
+
+    private <T> Mono<T> traceMessage(Mono<T> operation,
+                                     DeviceMessage message,
+                                     String spanName,
+                                     String direction,
+                                     String vehicleDeviceId,
+                                     String functionId) {
+        Mono<T> traced = operation.as(MonoTracer.create(spanName, builder -> {
+            builder
+                .setAttribute("parallel.driving.direction", direction)
+                .setAttribute("parallel.driving.cockpit.id",
+                    message.getHeader("sourceDeviceId")
+                        .map(String::valueOf)
+                        .orElseGet(() -> "cockpit-to-vehicle".equals(direction)
+                            ? message.getDeviceId()
+                            : ""));
+            if (message.getMessageId() != null && !message.getMessageId().isEmpty()) {
+                builder.setAttribute("messaging.message.id", message.getMessageId());
+            }
+            if (vehicleDeviceId != null && !vehicleDeviceId.isEmpty()) {
+                builder.setAttribute("parallel.driving.vehicle.id", vehicleDeviceId);
+            }
+            if (functionId != null && !functionId.isEmpty()) {
+                builder.setAttribute("parallel.driving.control.type", functionId);
+            }
+        }));
+        return traced.as(DeviceTracer.fromMessage(message));
     }
 }

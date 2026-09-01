@@ -11,6 +11,7 @@ import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoom;
 import org.jetlinks.community.parallel.driving.room.ParallelDrivingRoomManager;
 import org.jetlinks.core.message.Headers;
 import org.jetlinks.core.device.DeviceRegistry;
+import org.jetlinks.core.trace.MonoTracer;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -114,7 +115,18 @@ public class ParallelDrivingControlService {
             logService.logControlCommand(cockpitDeviceId, vehicleDeviceId, controlMessage, false, 
                 error.getMessage());
         });
-        return latencyMetrics.observeControlOperation("control", operation);
+        return latencyMetrics.observeControlOperation("control", operation)
+            .as(MonoTracer.create(
+                "/parallel-driving/control/" + controlMessage.getControlType().name().toLowerCase(),
+                builder -> {
+                    builder
+                        .setAttribute("parallel.driving.direction", "cockpit-to-vehicle")
+                        .setAttribute("parallel.driving.cockpit.id", cockpitDeviceId)
+                        .setAttribute("parallel.driving.vehicle.id", vehicleDeviceId)
+                        .setAttribute("parallel.driving.control.type",
+                            controlMessage.getControlType().name().toLowerCase())
+                        .setAttribute("messaging.message.id", controlMessage.getMessageId());
+                }));
     }
     
     /**

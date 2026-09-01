@@ -15,6 +15,8 @@ import org.jetlinks.core.message.Headers;
 import org.jetlinks.core.message.function.FunctionInvokeMessage;
 import org.jetlinks.core.message.function.FunctionInvokeMessageReply;
 import org.jetlinks.core.message.function.FunctionParameter;
+import org.jetlinks.core.trace.DeviceTracer;
+import org.jetlinks.core.trace.MonoTracer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -172,17 +174,33 @@ public class ParallelDrivingCustomMessageHandler {
             }
             
             if ("emergencystop".equals(messageName)) {
-                return handleEmergencyStop(customMsg, deviceMessage);
+                return traceCustomMessage(
+                    handleEmergencyStop(customMsg, deviceMessage),
+                    deviceMessage,
+                    messageName,
+                    customMsg.getString("vin"));
             } else if ("emergencystopresp".equals(messageName)) {
                 log.info("[车辆->云端->驾驶舱] ParallelDrivingCustomMessageHandler: 处理 emergencystopresp: deviceId={}, messageId={}", 
                     deviceMessage.getDeviceId(), deviceMessage.getMessageId());
-                return handleEmergencyStopResponse(customMsg, deviceMessage);
+                return traceCustomMessage(
+                    handleEmergencyStopResponse(customMsg, deviceMessage),
+                    deviceMessage,
+                    messageName,
+                    customMsg.getString("vin"));
             } else if ("remotejoystick".equals(messageName)) {
-                return handleRemoteJoystick(customMsg, deviceMessage);
+                return traceCustomMessage(
+                    handleRemoteJoystick(customMsg, deviceMessage),
+                    deviceMessage,
+                    messageName,
+                    customMsg.getString("vin"));
             } else if ("remotejoystickresp".equals(messageName)) {
                 log.debug("[车辆->云端->驾驶舱] ParallelDrivingCustomMessageHandler: 处理 remotejoystickresp: deviceId={}, messageId={}", 
                     deviceMessage.getDeviceId(), deviceMessage.getMessageId());
-                return handleRemoteJoystickResponse(customMsg, deviceMessage);
+                return traceCustomMessage(
+                    handleRemoteJoystickResponse(customMsg, deviceMessage),
+                    deviceMessage,
+                    messageName,
+                    customMsg.getString("vin"));
             }
             
             log.warn("ParallelDrivingCustomMessageHandler: 未知的自定义消息类型: deviceId={}, messageName={}", 
@@ -193,6 +211,35 @@ public class ParallelDrivingCustomMessageHandler {
                 deviceMessage.getDeviceId(), deviceMessage.getMessageId(), e);
             return Mono.empty();
         }
+    }
+
+    private <T> Mono<T> traceCustomMessage(Mono<T> operation,
+                                           DeviceMessage deviceMessage,
+                                           String messageName,
+                                           String vehicleDeviceId) {
+        String direction = deviceMessage instanceof FunctionInvokeMessageReply
+            ? "vehicle-to-cockpit"
+            : "cockpit-to-vehicle";
+        Mono<T> traced = operation.as(MonoTracer.create(
+            "/parallel-driving/message/" + messageName,
+            builder -> {
+                builder
+                    .setAttribute("parallel.driving.direction", direction)
+                    .setAttribute("parallel.driving.message.name", messageName)
+                    .setAttribute("parallel.driving.cockpit.id",
+                        "cockpit-to-vehicle".equals(direction)
+                            ? deviceMessage.getDeviceId()
+                            : deviceMessage.getHeader("sourceDeviceId")
+                                .map(String::valueOf)
+                                .orElse(""));
+                if (deviceMessage.getMessageId() != null && !deviceMessage.getMessageId().isEmpty()) {
+                    builder.setAttribute("messaging.message.id", deviceMessage.getMessageId());
+                }
+                if (vehicleDeviceId != null && !vehicleDeviceId.isEmpty()) {
+                    builder.setAttribute("parallel.driving.vehicle.id", vehicleDeviceId);
+                }
+            }));
+        return traced.as(DeviceTracer.fromMessage(deviceMessage));
     }
 
     /**
@@ -1096,7 +1143,7 @@ public class ParallelDrivingCustomMessageHandler {
             serverProcessingMs);
 
         // 使用 sendAndForget：send() 会等待设备对下行消息的协议应答，TCP 车端收到 INVOKE_FUNCTION_REPLY 后通常不回包，导致 DefaultDeviceMessageSender 超时
-        return deviceRegistry.getDevice(deviceId)
+        Mono<Void> operation = deviceRegistry.getDevice(deviceId)
             .switchIfEmpty(Mono.defer(() -> {
                 log.warn("[cloudLinkPing] skip pong: device not in registry deviceId={} requestMessageId={}",
                     deviceId, invoke.getMessageId());
@@ -1116,5 +1163,17 @@ public class ParallelDrivingCustomMessageHandler {
                     deviceId, invoke.getMessageId(), err.getMessage());
                 return Mono.empty();
             });
+        return operation.as(MonoTracer.create(
+            "/parallel-driving/cloud-link-ping",
+            builder -> {
+                builder
+                    .setAttribute("parallel.driving.direction", "vehicle-to-vehicle")
+                    .setAttribute("parallel.driving.vehicle.id", deviceId)
+                    .setAttribute("parallel.driving.control.type", "cloudLinkPing");
+                if (invoke.getMessageId() != null && !invoke.getMessageId().isEmpty()) {
+                    builder.setAttribute("messaging.message.id", invoke.getMessageId());
+                }
+            }))
+            .as(DeviceTracer.fromMessage(invoke));
     }
 }

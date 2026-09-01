@@ -15,6 +15,7 @@
  */
 package org.jetlinks.community.network.http.device;
 
+import io.opentelemetry.api.trace.SpanKind;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import lombok.AllArgsConstructor;
 import lombok.Setter;
@@ -33,6 +34,7 @@ import org.jetlinks.core.message.codec.http.HttpExchangeMessage;
 import org.jetlinks.core.message.codec.http.websocket.WebSocketMessage;
 import org.jetlinks.core.route.HttpRoute;
 import org.jetlinks.core.route.WebsocketRoute;
+import org.jetlinks.core.trace.DeviceTracer;
 import org.jetlinks.core.trace.MonoTracer;
 import org.jetlinks.core.utils.TopicUtils;
 import org.jetlinks.community.gateway.AbstractDeviceGateway;
@@ -195,24 +197,37 @@ public class HttpServerDeviceGateway extends AbstractDeviceGateway {
             message.thingId(DeviceThingType.device, session.getDeviceId());
         }
 
+        InetSocketAddress address = exchange
+            .getRemoteAddress()
+            .orElse(null);
         return helper
             .handleDeviceMessage(
-                message,
-                device -> new WebSocketDeviceSession(device, exchange),
-                deviceSession -> {
-                    if (deviceSession.isWrapFrom(WebSocketDeviceSession.class)) {
-                        deviceSession
-                            .unwrap(WebSocketDeviceSession.class)
-                            .setExchange(exchange);
-                    } else if (deviceSession.isWrapFrom(HttpDeviceSession.class)) {
-                        deviceSession
-                            .unwrap(HttpDeviceSession.class)
-                            .setWebsocket(exchange);
-                    }
-                },
-                () -> exchange
-                    .close(HttpStatus.NOT_FOUND)
-                    .then(Mono.empty()));
+                    message,
+                    device -> new WebSocketDeviceSession(device, exchange),
+                    deviceSession -> {
+                        if (deviceSession.isWrapFrom(WebSocketDeviceSession.class)) {
+                            deviceSession
+                                .unwrap(WebSocketDeviceSession.class)
+                                .setExchange(exchange);
+                        } else if (deviceSession.isWrapFrom(HttpDeviceSession.class)) {
+                            deviceSession
+                                .unwrap(HttpDeviceSession.class)
+                                .setWebsocket(exchange);
+                        }
+                    },
+                    () -> exchange
+                        .close(HttpStatus.NOT_FOUND)
+                        .then(Mono.empty()))
+            .as(MonoTracer.<DeviceOperator>create(
+                DeviceTracer.SpanName.upstream(message.getDeviceId()),
+                (span, ignored) -> span
+                    .setAttribute(DeviceTracer.SpanKey.deviceIdSemantic, message.getDeviceId()),
+                builder -> {
+                    builder
+                        .setSpanKind(SpanKind.SERVER)
+                        .setAttribute(DeviceTracer.SpanKey.deviceTransport, "websocket");
+                    setPeerAttributes(builder, address);
+                }));
     }
 
     private Mono<Void> handleHttpRequest(HttpExchange exchange) {
@@ -253,7 +268,20 @@ public class HttpServerDeviceGateway extends AbstractDeviceGateway {
                         })
                         .then();
                 }))
-            .as(MonoTracer.create("http-device-gateway/" + getId() + exchange.request().getPath()))
+            .as(MonoTracer.<Void>create(
+                "http-device-gateway/" + getId() + exchange.request().getPath(),
+                builder -> {
+                    builder
+                        .setSpanKind(SpanKind.SERVER)
+                        .setAttribute("http.method", exchange.request().getMethod().name())
+                        .setAttribute("http.request.method", exchange.request().getMethod().name())
+                        .setAttribute("http.url", exchange.request().getUrl())
+                        .setAttribute("url.full", exchange.request().getUrl())
+                        .setAttribute("http.route", exchange.request().getPath())
+                        .setAttribute("url.path", exchange.request().getPath())
+                        .setAttribute(DeviceTracer.SpanKey.deviceTransport, "http");
+                    setPeerAttributes(builder, exchange.request().getClientAddress());
+                }))
             .onErrorResume((error) -> {
                 log.error(error.getMessage(), error);
                 return response500Error(exchange, error);
@@ -278,7 +306,27 @@ public class HttpServerDeviceGateway extends AbstractDeviceGateway {
                                          .error(HttpStatus.NOT_FOUND)
                                          .then(Mono.empty());
                                  })
+            .as(MonoTracer.<DeviceOperator>create(
+                DeviceTracer.SpanName.upstream(deviceMessage.getDeviceId()),
+                (span, ignored) -> span
+                    .setAttribute(DeviceTracer.SpanKey.deviceIdSemantic, deviceMessage.getDeviceId()),
+                builder -> {
+                    builder
+                        .setSpanKind(SpanKind.SERVER)
+                        .setAttribute(DeviceTracer.SpanKey.deviceTransport, "http");
+                    setPeerAttributes(builder, address);
+                }))
             .then();
+    }
+
+    private static void setPeerAttributes(org.jetlinks.core.trace.ReactiveSpanBuilder builder,
+                                          InetSocketAddress address) {
+        if (address != null) {
+            if (address.getHostString() != null) {
+                builder.setAttribute(DeviceTracer.SpanKey.networkPeerAddress, address.getHostString());
+            }
+            builder.setAttribute(DeviceTracer.SpanKey.networkPeerPort, (long) address.getPort());
+        }
     }
 
     private void doReloadRoute(List<HttpRoute> routes) {

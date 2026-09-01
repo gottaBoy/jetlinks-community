@@ -171,7 +171,7 @@ jetlinks:
         enabled: true
         users: # 系统初始用户密码
             -   username: admin
-                password: ${ADMIN_USER_PASSWORD:JetLinks.C0mmVn1ty}
+                password: ${ADMIN_USER_PASSWORD:admin}
                 name: Administrator
                 type: admin
 rule:
@@ -253,8 +253,9 @@ system:
 management:
     server:
         # 默认只允许本机采集；跨主机 Prometheus/Collector 采集时设置为 0.0.0.0。
-        address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
-        port: ${MANAGEMENT_SERVER_PORT:${server.port}}
+        address: ${MANAGEMENT_SERVER_ADDRESS:0.0.0.0}
+        # 管理端口必须与业务端口分离，避免配置 management.server.address 时因同端口启动失败。
+        port: ${MANAGEMENT_SERVER_PORT:8850}
     endpoints:
         web:
             exposure:
@@ -341,12 +342,17 @@ network:
 trace:
     # 开启链路追踪
     enabled: true
+    # 发送OTLP Trace到DataBuff/Collector。可通过环境变量覆盖。
+    service-name: ${OTEL_SERVICE_NAME:ziot-gq}
+    service-instance-id: ${OTEL_SERVICE_INSTANCE_ID:ziot-gq}
+    deployment-environment: ${OTEL_DEPLOYMENT_ENVIRONMENT:dev}
+    otlp:
+        enabled: ${OTEL_EXPORTER_OTLP_ENABLED:true}
+        endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://ai-apm-ingest.intra.zeron.ai/v1/traces}
     jaeger: # https://hanta.yuque.com/px7kg1/dev/nn2r53n5w8ttap8a
         enabled: false # 记录链路数据到jaeger
         endpoint: "http://127.0.0.1:14250"
     ignore-spans:
-        - "/device/*/upstream"
-        - "/device/*/decode"
         - "/java/TimeSeriesMessageWriterConnector/writeDeviceMessageToTs"
         - "/java/DeviceStatusMeasurementProvider/incrementOnline"
         - "/java/DeviceMessageMeasurementProvider/incrementMessage"
