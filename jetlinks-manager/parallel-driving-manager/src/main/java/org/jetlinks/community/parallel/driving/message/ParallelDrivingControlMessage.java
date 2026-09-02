@@ -208,6 +208,10 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
                 addInput("controlType", "mrc");
                 Object status = controlParams.get("mrc_status");
                 if (status != null) addInput("mrc_status", toInt(status));
+                Object selfRecoverStatus = controlParams.get("self_recover_status");
+                if (selfRecoverStatus != null) {
+                    addInput("self_recover_status", toInt(selfRecoverStatus));
+                }
                 break;
             }
             default:
