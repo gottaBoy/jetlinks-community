@@ -24,7 +24,7 @@ import java.util.Map;
 @RequestMapping("/parallel-driving/control")
 @Tag(name = "平行驾驶控制")
 @Authorize
-@Resource(id = "parallel-driving-control", name = "平行驾驶控制")
+@Resource(id = "parallel-driving", name = "平行驾驶管理")
 @AllArgsConstructor
 public class ParallelDrivingControlController {
     
@@ -41,7 +41,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/command")
     @Operation(summary = "发送控制指令")
-    @ResourceAction(id = "send", name = "发送控制指令")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> sendControlCommand(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,
@@ -69,7 +69,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/steering")
     @Operation(summary = "转向控制")
-    @ResourceAction(id = "steering", name = "转向控制")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> steering(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,
@@ -83,7 +83,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/accelerator")
     @Operation(summary = "加速控制")
-    @ResourceAction(id = "accelerator", name = "加速控制")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> accelerator(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,
@@ -97,7 +97,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/brake")
     @Operation(summary = "制动控制")
-    @ResourceAction(id = "brake", name = "制动控制")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> brake(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,
@@ -111,7 +111,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/gear")
     @Operation(summary = "档位控制")
-    @ResourceAction(id = "gear", name = "档位控制")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> gear(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,
@@ -125,7 +125,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/emergency-stop")
     @Operation(summary = "紧急停车")
-    @ResourceAction(id = "emergency-stop", name = "紧急停车")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> emergencyStop(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId
@@ -138,7 +138,7 @@ public class ParallelDrivingControlController {
      */
     @PostMapping("/set-speed")
     @Operation(summary = "设置速度")
-    @ResourceAction(id = "set-speed", name = "设置速度")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> setSpeed(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId,

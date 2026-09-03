@@ -41,6 +41,8 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
         HAZARD_LIGHT("hazardLight", "双闪灯"),
         /** 辅助灯：controlParams.on 0/1 */
         AUX_LIGHT("auxLight", "辅助灯"),
+        /** 装卸货灯：controlParams.green_light_cmd 0/1 */
+        GREEN_LIGHT("greenLight", "装卸货灯"),
         /** 驾驶模式：controlParams.mode 0=M手动 1=A智驾 2=R远控(平行) — 与车端 parallelDrivingControl + e2e driving_mode 一致 */
         DRIVE_MODE("driveMode", "驾驶模式"),
         /** MRC 紧急停车：controlParams.mrc_status 0=正常 1=MRC0 2=MRC1 3=MRC2（M/A/R 任意模式可触发） */
@@ -154,6 +156,7 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
      *   hazard_li_cmd : 0=off, 1=on
      *   epb_cmd       : 0=释放, 1=拉起
      *   aux_li_cmd    : 0=off, 1=on
+     *   green_light_cmd : 0=off, 1=on
      *
      * Call this method once before forwarding the message to the vehicle.
      */
@@ -202,6 +205,12 @@ public class ParallelDrivingControlMessage extends FunctionInvokeMessage {
                 addInput("controlType", "aux_light");
                 Object on = controlParams.get("on");
                 if (on != null) addInput("aux_li_cmd", toInt(on));  // 0=off, 1=on
+                break;
+            }
+            case GREEN_LIGHT: {
+                addInput("controlType", "green_light");
+                Object command = controlParams.get("green_light_cmd");
+                if (command != null) addInput("green_light_cmd", toInt(command));  // 0=off, 1=on
                 break;
             }
             case MRC: {

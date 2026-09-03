@@ -168,7 +168,7 @@ public class ParallelDrivingController {
      */
     @PostMapping("/takeover")
     @Operation(summary = "远程接管车辆")
-    @ResourceAction(id = "takeover", name = "远程接管")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<ParallelDrivingSession> takeover(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId
@@ -185,7 +185,7 @@ public class ParallelDrivingController {
      */
     @PostMapping("/release")
     @Operation(summary = "释放控制")
-    @ResourceAction(id = "release", name = "释放控制")
+    @ResourceAction(id = "query", name = "查询")
     public Mono<Void> release(
         @Parameter(description = "驾驶舱设备ID") @RequestParam String cockpitDeviceId,
         @Parameter(description = "车辆设备ID") @RequestParam String vehicleDeviceId
@@ -257,4 +257,3 @@ public class ParallelDrivingController {
         return queryParam.flatMap(cockpitService::queryCockpitsWithState);
     }
 }
-
